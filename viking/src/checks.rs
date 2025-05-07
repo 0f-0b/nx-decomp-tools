@@ -597,9 +597,17 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
                 .ok()?,
         );
 
-        let data_symbol = self.known_data_symbols.get_symbol(orig_addr)?;
         let decomp_addr = *self.decomp_glob_data_table.get(&decomp_addr_ptr)?;
-        self.check_data_symbol_ex(orig_addr, decomp_addr, data_symbol)
+
+        if let Some(mismatch_cause) = self.check_data_symbol(orig_addr, decomp_addr) {
+            return Some(mismatch_cause);
+        }
+
+        if let Some(mismatch_cause) = self.check_constant(orig_addr, decomp_addr) {
+            return Some(mismatch_cause);
+        }
+
+        None
     }
 
     fn check_constant(&self, orig_addr: u64, decomp_addr: u64) -> Option<MismatchCause> {
