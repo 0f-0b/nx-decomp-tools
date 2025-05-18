@@ -88,7 +88,7 @@ fn get_include_paths(stderr: &str) -> Vec<&str> {
         .collect()
 }
 
-fn uninclude_system_includes<'a>(stdout: &'a str, include_paths: &Vec<&str>) -> String {
+fn uninclude_system_includes(stdout: &str, include_paths: &Vec<&str>) -> String {
     let mut result = String::with_capacity(stdout.len());
 
     // The current include stack.

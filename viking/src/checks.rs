@@ -1,43 +1,32 @@
 use anyhow::{bail, ensure, Context, Result};
 use capstone as cs;
 use cs::arch::arm64::{Arm64Insn, Arm64Operand, Arm64OperandType};
-use lazy_init::Lazy;
 use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::iter::zip;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::{capstone_utils::*, elf, functions, repo, ui};
 
 struct DataSymbol {
     /// Address of the symbol in the original executable.
     pub addr: u64,
+    /// Size of the symbol in the original executable.
+    pub size: u64,
     /// Name of the symbol in our source code.
     pub name: String,
-    /// Size of the symbol in our source code (according to ELF info).
-    pub size: u64,
 }
 
-fn parse_data_symbol_csv_entry(
-    record: &csv::StringRecord,
-    decomp_symtab: &elf::SymbolTableByName,
-) -> Result<Option<DataSymbol>> {
-    ensure!(record.len() == 2, "wrong number of fields");
+fn parse_data_symbol_csv_entry(record: &csv::StringRecord) -> Result<DataSymbol> {
+    ensure!(record.len() == 3, "wrong number of fields");
 
     let addr = functions::parse_address(&record[0])?;
-    let name = &record[1];
+    let size = record[1].parse()?;
+    let name = record[2].to_owned();
 
-    let Some(symbol) = decomp_symtab.get(name) else {
-        // Ignore missing symbols.
-        return Ok(None);
-    };
-
-    Ok(Some(DataSymbol {
-        addr,
-        name: name.to_owned(),
-        size: symbol.st_size,
-    }))
+    Ok(DataSymbol { addr, size, name })
 }
 
 /// Keeps track of known data symbols so that data loads can be validated.
@@ -52,15 +41,16 @@ impl KnownDataSymbolMap {
         Default::default()
     }
 
-    fn load(&mut self, csv_path: &Path, decomp_symtab: &elf::SymbolTableByName) -> Result<()> {
+    fn load(&mut self, csv_path: &Path) -> Result<()> {
+        const HEADER: &[&str] = &["Address", "Size", "Name"];
         let mut reader = csv::ReaderBuilder::new()
-            .has_headers(false)
             .quoting(false)
             .from_path(csv_path)?;
+        ensure!(reader.headers()? == HEADER, "wrong format");
         for (line, maybe_record) in reader.records().enumerate() {
-            let entry = parse_data_symbol_csv_entry(&maybe_record?, decomp_symtab)
+            let entry = parse_data_symbol_csv_entry(&maybe_record?)
                 .with_context(|| format!("failed to parse record at line {}", line + 1))?;
-            self.symbols.extend(entry);
+            self.symbols.push(entry);
         }
         self.symbols.sort_by_key(|sym| sym.addr);
         Ok(())
@@ -68,28 +58,12 @@ impl KnownDataSymbolMap {
 
     /// If addr is part of a known data symbol, this function returns the corresponding symbol.
     fn get_symbol(&self, addr: u64) -> Option<&DataSymbol> {
-        // Perform a binary search since `symbols` is sorted.
-        let mut a: isize = 0;
-        let mut b: isize = self.symbols.len() as isize - 1;
-        while a <= b {
-            let m = a + (b - a) / 2;
-
-            let mid_symbol = &self.symbols[m as usize];
-            let mid_addr_begin = mid_symbol.addr;
-            let mid_addr_end = mid_addr_begin + mid_symbol.size;
-
-            if mid_addr_begin <= addr && addr < mid_addr_end {
-                return Some(mid_symbol);
-            }
-            if addr <= mid_addr_begin {
-                b = m - 1;
-            } else if addr >= mid_addr_end {
-                a = m + 1;
-            } else {
-                break;
-            }
-        }
-        None
+        let index = self
+            .symbols
+            .partition_point(|sym| sym.addr <= addr)
+            .checked_sub(1)?;
+        let sym = &self.symbols[index];
+        (addr < sym.addr + sym.size).then_some(sym)
     }
 }
 
@@ -260,11 +234,12 @@ impl std::fmt::Display for Mismatch {
 
 pub struct FunctionChecker<'a, 'functions, 'orig_elf, 'decomp_elf> {
     pub decomp_elf: &'decomp_elf elf::OwnedElf,
+    decomp_symbols: &'a elf::SymbolSet<'decomp_elf>,
     pub decomp_symtab: &'a elf::SymbolTableByName<'decomp_elf>,
     decomp_glob_data_table: elf::GlobDataTable,
 
     // Optional, only initialized when a mismatch is detected.
-    decomp_addr_to_name_map: Lazy<elf::AddrToNameMap<'decomp_elf>>,
+    decomp_addr_to_name_map: OnceLock<elf::AddrToNameMap<'decomp_elf>>,
 
     known_data_symbols: KnownDataSymbolMap,
     known_constants: ConstantMap,
@@ -280,6 +255,7 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
     pub fn new(
         orig_elf: &'orig_elf elf::OwnedElf,
         decomp_elf: &'decomp_elf elf::OwnedElf,
+        decomp_symbols: &'a elf::SymbolSet<'decomp_elf>,
         decomp_symtab: &'a elf::SymbolTableByName<'decomp_elf>,
         decomp_glob_data_table: elf::GlobDataTable,
         functions: &'functions [functions::Info],
@@ -287,7 +263,7 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
     ) -> Result<Self> {
         let mut known_data_symbols = KnownDataSymbolMap::new();
         known_data_symbols
-            .load(&get_data_symbol_csv_path(version)?, decomp_symtab)
+            .load(&get_data_symbol_csv_path(version)?)
             .context("failed to load data_symbols.csv")?;
 
         let mut known_constants = ConstantMap::new();
@@ -301,9 +277,10 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
 
         Ok(FunctionChecker {
             decomp_elf,
+            decomp_symbols,
             decomp_symtab,
             decomp_glob_data_table,
-            decomp_addr_to_name_map: Lazy::new(),
+            decomp_addr_to_name_map: OnceLock::new(),
 
             known_data_symbols,
             known_constants,
@@ -529,53 +506,42 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
     fn check_function_call(&self, orig_addr: u64, decomp_addr: u64) -> Option<MismatchCause> {
         let info = *self.known_functions.get(&orig_addr)?;
         let name = info.name.as_str();
-        let decomp_symbol = self.decomp_symtab.get(name)?;
-        let expected = decomp_symbol.st_value;
 
-        if decomp_addr == expected {
-            None
-        } else {
-            let actual_symbol_name = self.translate_decomp_addr_to_name(decomp_addr);
-
-            Some(MismatchCause::FunctionCall(ReferenceDiff {
-                referenced_symbol: orig_addr,
-                expected_ref_in_decomp: expected,
-                actual_ref_in_decomp: decomp_addr,
-                expected_symbol_name: name.to_string(),
-                actual_symbol_name: actual_symbol_name.unwrap_or("unknown").to_string(),
-            }))
+        if self.decomp_symbols.contains(&(decomp_addr, name)) {
+            return None;
         }
-    }
 
-    /// Returns None on success and a MismatchCause on failure.
-    fn check_data_symbol_ex(
-        &self,
-        orig_addr: u64,
-        decomp_addr: u64,
-        symbol: &DataSymbol,
-    ) -> Option<MismatchCause> {
-        let decomp_symbol = self.decomp_symtab.get(symbol.name.as_str())?;
-        let expected = decomp_symbol.st_value;
+        let expected = self.translate_decomp_name_to_addr(name)?;
+        let actual_symbol_name = self.translate_decomp_addr_to_name(decomp_addr);
 
-        if decomp_addr == expected {
-            None
-        } else {
-            let actual_symbol_name = self.translate_decomp_addr_to_name(decomp_addr);
-
-            Some(MismatchCause::DataReference(ReferenceDiff {
-                referenced_symbol: orig_addr,
-                expected_ref_in_decomp: expected,
-                actual_ref_in_decomp: decomp_addr,
-                expected_symbol_name: symbol.name.to_string(),
-                actual_symbol_name: actual_symbol_name.unwrap_or("unknown").to_string(),
-            }))
-        }
+        Some(MismatchCause::FunctionCall(ReferenceDiff {
+            referenced_symbol: orig_addr,
+            expected_ref_in_decomp: expected,
+            actual_ref_in_decomp: decomp_addr,
+            expected_symbol_name: name.to_string(),
+            actual_symbol_name: actual_symbol_name.unwrap_or("<unknown>").to_string(),
+        }))
     }
 
     /// Returns None on success and a MismatchCause on failure.
     fn check_data_symbol(&self, orig_addr: u64, decomp_addr: u64) -> Option<MismatchCause> {
         let symbol = self.known_data_symbols.get_symbol(orig_addr)?;
-        self.check_data_symbol_ex(orig_addr, decomp_addr, symbol)
+        let name = symbol.name.as_str();
+
+        if self.decomp_symbols.contains(&(decomp_addr, name)) {
+            return None;
+        }
+
+        let expected = self.translate_decomp_name_to_addr(name)?;
+        let actual_symbol_name = self.translate_decomp_addr_to_name(decomp_addr);
+
+        Some(MismatchCause::DataReference(ReferenceDiff {
+            referenced_symbol: orig_addr,
+            expected_ref_in_decomp: expected,
+            actual_ref_in_decomp: decomp_addr,
+            expected_symbol_name: symbol.name.to_string(),
+            actual_symbol_name: actual_symbol_name.unwrap_or("<unknown>").to_string(),
+        }))
     }
 
     /// Returns None on success and a MismatchCause on failure.
@@ -648,12 +614,17 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
     }
 
     #[cold]
-    #[inline(never)]
     fn translate_decomp_addr_to_name(&self, decomp_addr: u64) -> Option<&'decomp_elf str> {
-        let map = self.decomp_addr_to_name_map.get_or_create(|| {
-            let map = elf::make_addr_to_name_map(self.decomp_elf).ok();
-            map.unwrap_or_default()
+        let map = self.decomp_addr_to_name_map.get_or_init(|| {
+            elf::SymbolStringTable::from_elf(self.decomp_elf)
+                .and_then(|strtab| elf::make_addr_to_name_map(self.decomp_elf, strtab))
+                .unwrap_or_default()
         });
         map.get(&decomp_addr).copied()
+    }
+
+    #[cold]
+    fn translate_decomp_name_to_addr(&self, name: &str) -> Option<u64> {
+        self.decomp_symtab.get(&name).map(|sym| sym.st_value)
     }
 }
