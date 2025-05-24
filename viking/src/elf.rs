@@ -179,7 +179,7 @@ pub fn find_function_symbol_by_name(elf: &OwnedElf, name: &str) -> Result<Sym> {
             return Ok(symbol);
         }
     }
-    bail!("unknown function")
+    bail!("Unknown function: {:?}", name)
 }
 
 pub fn make_symbol_map_by_name(elf: &OwnedElf) -> Result<SymbolTableByName<'_>> {

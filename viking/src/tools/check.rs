@@ -1,3 +1,4 @@
+use addr2line::fallible_iterator::FallibleIterator;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -9,14 +10,13 @@ use itertools::Itertools;
 use lexopt::prelude::*;
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::atomic;
-use std::sync::Mutex;
 use viking::checks::FunctionChecker;
 use viking::checks::Mismatch;
 use viking::elf;
 use viking::functions;
+use viking::functions::get_file_list_path;
 use viking::functions::Status;
 use viking::repo;
 use viking::ui;
@@ -32,6 +32,7 @@ struct Args {
     version: Option<String>,
     always_diff: bool,
     warnings_as_errors: bool,
+    check_placement: bool,
     print_help: bool,
     other_args: Vec<String>,
 }
@@ -60,12 +61,16 @@ fn main() -> Result<()> {
     // Load these in parallel.
     let mut decomp_symtab = None;
     let mut decomp_glob_data_table = None;
-    let mut functions = None;
+    let mut file_list = None;
 
     rayon::scope(|s| {
         s.spawn(|_| decomp_symtab = Some(elf::make_symbol_map_by_name(&decomp_elf)));
         s.spawn(|_| decomp_glob_data_table = Some(elf::build_glob_data_table(&decomp_elf)));
-        s.spawn(|_| functions = Some(functions::get_functions(version)));
+        s.spawn(|_| {
+            file_list = Some(functions::parse_file_list(
+                get_file_list_path(version).as_path(),
+            ));
+        });
     });
 
     let decomp_symtab = decomp_symtab
@@ -76,7 +81,9 @@ fn main() -> Result<()> {
         .unwrap()
         .context("failed to make global data table")?;
 
-    let functions = functions.unwrap().context("failed to load function CSV")?;
+    let file_list = file_list.unwrap().context("failed to load file list")?;
+
+    let functions = functions::get_functions(&file_list);
 
     let checker = FunctionChecker::new(
         &orig_elf,
@@ -89,9 +96,9 @@ fn main() -> Result<()> {
     .context("failed to construct FunctionChecker")?;
 
     if let Some(func) = &args.function {
-        check_single(&checker, &functions, func, &args)?;
+        check_single(&checker, &functions, file_list, func, &args)?;
     } else {
-        check_all(&checker, &functions, &args)?;
+        check_all(&checker, file_list, &args)?;
     }
 
     Ok(())
@@ -118,6 +125,10 @@ fn parse_args() -> Result<Args, lexopt::Error> {
 
             Long("help") | Short('h') => {
                 args.print_help = true;
+            }
+
+            Long("check-placement") | Short('p') => {
+                args.check_placement = true;
             }
 
             Value(other_val) if args.function.is_none() => {
@@ -156,6 +167,7 @@ optional arguments:
  -h, --help             Show this help message and exit
  --version VERSION      Check the function against version VERSION of the game elf
  --always-diff          Show an assembly diff, even if the function matches
+ -p, --check-placement      Check that functions are placed in the correct objects and are correctly placed in the header if they are marked as lazy
 All further arguments are forwarded onto asm-differ.
 
 asm-differ arguments:"
@@ -216,7 +228,7 @@ fn check_function(
     function: &functions::Info,
     args: &Args,
 ) -> Result<CheckResult> {
-    let name = function.name.as_str();
+    let name = function.name().as_str();
     let decomp_fn = elf::get_function_by_name(checker.decomp_elf, checker.decomp_symtab, name);
 
     match function.status {
@@ -240,12 +252,12 @@ fn check_function(
     let decomp_fn = decomp_fn.unwrap();
 
     let get_orig_fn = || {
-        elf::get_function(checker.orig_elf, function.addr, function.size as u64).with_context(
+        elf::get_function(checker.orig_elf, function.offset, function.size as u64).with_context(
             || {
                 format!(
                     "failed to get function {} ({}) from the original executable",
                     name,
-                    ui::format_address(function.addr),
+                    ui::format_address(function.offset),
                 )
             },
         )
@@ -309,13 +321,14 @@ fn check_function(
 
 fn check_single(
     checker: &FunctionChecker,
-    functions: &[functions::Info],
+    functions: &Vec<functions::Info>,
+    mut file_list: functions::FileListMap,
     fn_to_check: &str,
     args: &Args,
 ) -> Result<()> {
     let version = args.get_version();
-    let function = ui::fuzzy_search_function_interactively(functions, fn_to_check)?;
-    let name = function.name.as_str();
+    let function = ui::fuzzy_search_function_interactively(&functions, fn_to_check)?;
+    let name = function.name().as_str();
 
     eprintln!("{}", ui::format_symbol_name(name).bold());
 
@@ -327,7 +340,7 @@ fn check_single(
     let name = if checker.decomp_symtab.contains_key(name) {
         name
     } else {
-        resolved_name = resolve_unknown_fn_interactively(name, checker.decomp_symtab, functions)?;
+        resolved_name = resolve_unknown_fn_interactively(name, checker.decomp_symtab, &functions)?;
         &resolved_name
     };
 
@@ -339,7 +352,7 @@ fn check_single(
             )
         })?;
 
-    let orig_fn = elf::get_function(checker.orig_elf, function.addr, function.size as u64)?;
+    let orig_fn = elf::get_function(checker.orig_elf, function.offset, function.size as u64)?;
 
     let mut maybe_mismatch = checker
         .check(&mut make_cs()?, &orig_fn, &decomp_fn)
@@ -358,76 +371,151 @@ fn check_single(
         show_asm_differ(function, name, &args.other_args, version)?;
 
         maybe_mismatch =
-            rediff_function_after_differ(functions, &orig_fn, name, &maybe_mismatch, version)
+            rediff_function_after_differ(&functions, &orig_fn, name, &maybe_mismatch, version)
                 .context("failed to rediff")?;
     }
 
     let new_status = match maybe_mismatch {
-        None => Status::Matching,
+        Option::None => Status::Matching,
         _ if function.status == Status::NotDecompiled => Status::Wip,
         _ => function.status.clone(),
     };
 
     // Update the function entry if needed.
     let status_changed = function.status != new_status;
-    let name_was_ambiguous = function.name != name;
-    if status_changed || name_was_ambiguous {
-        if status_changed {
-            ui::print_note(&format!(
-                "changing status from {:?} to {:?}",
-                function.status, new_status
-            ));
-        }
-
-        update_function_in_function_list(functions, function.addr, version, |entry| {
-            entry.status = new_status.clone();
-            entry.name = name.to_string();
-        })?;
+    if status_changed {
+        ui::print_note(&format!(
+            "changing status from {:?} to {:?}",
+            function.status, new_status
+        ));
+        update_single_function_in_file_list(&mut file_list, function.offset, new_status)?;
+        functions::write_functions_to_path(
+            functions::get_file_list_path(args.version.as_deref()).as_path(),
+            &file_list,
+        )?;
     }
 
     Ok(())
 }
 
-fn check_all(checker: &FunctionChecker, functions: &[functions::Info], args: &Args) -> Result<()> {
-    let failed = atomic::AtomicBool::new(false);
-    let new_function_statuses: Mutex<HashMap<u64, functions::Status>> = Mutex::new(HashMap::new());
+fn check_all(
+    checker: &FunctionChecker,
+    mut file_list: functions::FileListMap,
+    args: &Args,
+) -> Result<()> {
+    let data = &checker.decomp_elf.as_owner().1;
+    let data_sync = std::sync::Arc::new(data);
 
-    functions.par_iter().for_each(|function| {
-        let result = CAPSTONE.with(|cs| -> Result<()> {
-            let mut cs = cs.borrow_mut();
-            let ok = check_function(checker, &mut cs, function, args)?;
-            match ok {
-                CheckResult::MismatchError => {
+    let failed = atomic::AtomicBool::new(false);
+    let functions_changed = atomic::AtomicBool::new(false);
+
+    file_list.par_iter_mut().try_for_each_init(
+        || {
+            if !args.check_placement {
+                return None;
+            }
+            // addr2line structs can't be safely shared between threads, so we create one context
+            // per thread (NOT per iteration)
+            let file = addr2line::object::File::parse(&data_sync.clone()).unwrap();
+            Some(addr2line::Context::new(&file).unwrap())
+        },
+        |ctx, (object_name, object)| -> Result<()> {
+            for function in object.text_section.iter_mut() {
+                let result = CAPSTONE.with(|cs| -> Result<()> {
+                    let mut cs = cs.borrow_mut();
+                    let status = check_function(checker, &mut cs, function, args).unwrap();
+                    match status {
+                        CheckResult::MismatchError => {
+                            failed.store(true, atomic::Ordering::Relaxed);
+                        }
+                        CheckResult::MatchWarn => {
+                            if function.status != functions::Status::Matching {
+                                functions_changed.store(true, atomic::Ordering::Relaxed);
+                                function.status = functions::Status::Matching;
+                            }
+                        }
+                        CheckResult::MismatchWarn => {
+                            if function.status != functions::Status::NonMatchingMajor {
+                                functions_changed.store(true, atomic::Ordering::Relaxed);
+                                function.status = functions::Status::NonMatchingMajor;
+                            }
+
+                        }
+                        CheckResult::Ok => {}
+                    }
+                    Ok(())
+                });
+
+                if result.is_err() {
                     failed.store(true, atomic::Ordering::Relaxed);
                 }
-                CheckResult::MatchWarn => {
-                    new_function_statuses
-                        .lock()
-                        .unwrap()
-                        .insert(function.addr, functions::Status::Matching);
+
+                if args.check_placement {
+                    let ctx = ctx.as_ref().unwrap();
+                    let symbol =
+                        elf::find_function_symbol_by_name(&checker.decomp_elf, function.name());
+                    let demangled_name = viking::functions::demangle_str(function.name()).unwrap_or(function.name().clone());
+                    if let Ok(sym) = symbol {
+                        let file_name = ctx
+                            .find_frames(sym.st_value)
+                            .unwrap()
+                            .last()
+                            .unwrap()
+                            .context("No frame found")?
+                            .location.context("No location found")?
+                            .file.context("no file found")?.to_owned();
+                        if function.lazy {
+                            if sym.st_bind() != goblin::elf::sym::STB_WEAK {
+                                viking::ui::print_warning(&format!("Found function that is marked as lazy in the file list, but not in the decomp elf: {:?} (maybe move into the header?)", demangled_name));
+                            }
+                            continue;
+                        }
+                        if !file_name.ends_with(".cpp") { continue; }
+                        let object_path_start_index: usize;
+                        if let Some(index) = file_name.find("lib/") {
+                            object_path_start_index = index + 4;
+                        } else if let Some(index) = file_name.find("src/") {
+                            object_path_start_index = index + 4;
+                        } else {
+                            bail!("Source file should not be located outside of lib and src");
+                        }
+                        let mut object_path = file_name[object_path_start_index..].to_owned();
+                        if let Some(prefixes) = repo::get_config().file_list_removed_prefixes.clone() {
+                            for prefix in prefixes {
+                                if object_path.starts_with(&prefix) {
+                                    object_path = object_path[prefix.len()..].to_owned();
+                                }
+                            }
+                        }
+
+                        if let Some(excluded_folders) = repo::get_config().ignore_placement_in_objects_from.clone() {
+                            let mut skip_object = false;
+                            for folder in excluded_folders {
+                                if object_path.starts_with(&folder) {
+                                    skip_object = true;
+                                    break;
+                                }
+                            }
+                            if skip_object { continue; }
+                        }
+
+                        object_path = object_path.replace(".cpp", ".o");
+                            if object_path != *object_name {
+                            viking::ui::print_warning(&format!("Found function implemented in the wrong file: {:?}, implemented in: {:?}, should be implemented in: {:?}", demangled_name, object_path, object_name));
+                        }
+                    }
                 }
-                CheckResult::MismatchWarn => {
-                    new_function_statuses
-                        .lock()
-                        .unwrap()
-                        .insert(function.addr, functions::Status::NonMatchingMajor);
-                }
-                CheckResult::Ok => {}
             }
             Ok(())
-        });
+        },
+    )?;
 
-        if result.is_err() {
-            failed.store(true, atomic::Ordering::Relaxed);
-        }
-    });
-
-    update_function_statuses(
-        functions,
-        &new_function_statuses.lock().unwrap(),
-        args.version.as_deref(),
-    )
-    .with_context(|| "failed to update function statuses")?;
+    if functions_changed.load(atomic::Ordering::Relaxed) {
+        functions::write_functions_to_path(
+            functions::get_file_list_path(args.version.as_deref()).as_path(),
+            &file_list,
+        )?;
+    }
 
     if failed.load(atomic::Ordering::Relaxed) {
         bail!("found at least one error");
@@ -452,48 +540,29 @@ thread_local! {
     static CAPSTONE: RefCell<cs::Capstone> = RefCell::new(make_cs().unwrap());
 }
 
-fn update_function_statuses(
-    functions: &[functions::Info],
-    new_function_statuses: &HashMap<u64, functions::Status>,
-    version: Option<&str>,
+fn update_single_function_in_file_list(
+    file_list: &mut functions::FileListMap,
+    address: u64,
+    new_status: functions::Status,
 ) -> Result<()> {
-    if new_function_statuses.is_empty() {
-        return Ok(());
-    }
-
-    let mut new_functions = functions.to_vec();
-
-    new_functions.par_iter_mut().for_each(|info| {
-        if let Some(status) = new_function_statuses.get(&info.addr) {
-            info.status = status.clone()
+    for object in file_list.values_mut() {
+        for function in object.text_section.iter_mut() {
+            if function.offset == address {
+                function.status = new_status.clone();
+                return Ok(());
+            }
         }
-    });
-
-    functions::write_functions(&new_functions, version)
-}
-
-fn update_function_in_function_list<UpdateFn>(
-    functions: &[functions::Info],
-    addr: u64,
-    version: Option<&str>,
-    update_fn: UpdateFn,
-) -> Result<()>
-where
-    UpdateFn: FnOnce(&mut functions::Info),
-{
-    let mut new_functions = functions.to_vec();
-    let entry = new_functions
-        .iter_mut()
-        .find(|info| info.addr == addr)
-        .unwrap();
-    update_fn(entry);
-    functions::write_functions(&new_functions, version)
+    }
+    bail!(
+        "Could not find function to update (with address: {:?})",
+        address
+    )
 }
 
 fn resolve_unknown_fn_interactively(
     ambiguous_name: &str,
     decomp_symtab: &elf::SymbolTableByName,
-    functions: &[functions::Info],
+    functions: &Vec<functions::Info>,
 ) -> Result<String> {
     let fail = || -> Result<String> {
         bail!("unknown function: {}", ambiguous_name);
@@ -519,7 +588,7 @@ fn resolve_unknown_fn_interactively(
     let decompiled_functions: HashSet<&str> = functions
         .iter()
         .filter(|info| info.is_decompiled())
-        .map(|info| info.name.as_str())
+        .map(|info| info.name().as_str())
         .collect();
     candidates.retain(|(&name, _)| !decompiled_functions.contains(name));
 
@@ -572,8 +641,8 @@ fn show_asm_differ(
         .arg("-I")
         .arg("-e")
         .arg(name)
-        .arg(format!("0x{:016x}", function.addr))
-        .arg(format!("0x{:016x}", function.addr + function.size as u64))
+        .arg(format!("0x{:016x}", function.offset))
+        .arg(format!("0x{:016x}", function.offset + function.size as u64))
         .args(differ_args);
 
     if let Some(version) = version {
@@ -587,7 +656,7 @@ fn show_asm_differ(
 }
 
 fn rediff_function_after_differ(
-    functions: &[functions::Info],
+    functions: &Vec<functions::Info>,
     orig_fn: &elf::Function,
     name: &str,
     previous_check_result: &Option<Mismatch>,

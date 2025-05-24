@@ -189,14 +189,14 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
         decomp_elf: &'decomp_elf elf::OwnedElf,
         decomp_symtab: &'a elf::SymbolTableByName<'decomp_elf>,
         decomp_glob_data_table: elf::GlobDataTable,
-        functions: &'functions [functions::Info],
+        functions: &'functions Vec<functions::Info>,
         version: Option<&str>,
     ) -> Result<Self> {
         let mut known_data_symbols = KnownDataSymbolMap::new();
         known_data_symbols.load(get_data_symbol_csv_path(version)?.as_path(), decomp_symtab)?;
 
-        let known_functions = functions::make_known_function_map(functions);
-        
+        let known_functions = functions::make_known_function_map(&functions);
+
         let orig_got_section = elf::find_section(orig_elf, ".got").ok();
 
         Ok(FunctionChecker {
@@ -418,7 +418,7 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
     /// Returns None on success and a MismatchCause on failure.
     fn check_function_call(&self, orig_addr: u64, decomp_addr: u64) -> Option<MismatchCause> {
         let info = *self.known_functions.get(&orig_addr)?;
-        let name = info.name.as_str();
+        let name = info.name().as_str();
         let decomp_symbol = self.decomp_symtab.get(name)?;
         let expected = decomp_symbol.st_value;
 
