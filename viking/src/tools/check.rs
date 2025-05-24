@@ -33,6 +33,7 @@ struct Args {
     version: Option<String>,
     always_diff: bool,
     warnings_as_errors: bool,
+    check_mismatch_comments: bool,
     check_placement: bool,
     check_object_ordering: bool,
     print_help: bool,
@@ -129,6 +130,10 @@ fn parse_args() -> Result<Args, lexopt::Error> {
                 args.print_help = true;
             }
 
+            Long("check-mismatch-comments") => {
+                args.check_mismatch_comments = true;
+            }
+
             Long("check-placement") | Short('p') => {
                 args.check_placement = true;
             }
@@ -163,7 +168,7 @@ fn parse_args() -> Result<Args, lexopt::Error> {
 
 fn print_help() -> Result<()> {
     println!(
-"Usage: check [function name] [--version VERSION] [--always-diff] [asm-differ arguments]
+"Usage: check [function name] [--version VERSION] [--always-diff] [--check-mismatch-comments] [--check-placement] [--check-object-ordering] [asm-differ arguments]
 
 Checks if the compiled bytecode of a function matches the assembly found within the game elf. If not, show the differences between them.
 If no function name is provided, all functions within the repository function list will be checked.
@@ -173,7 +178,10 @@ optional arguments:
  -h, --help             Show this help message and exit
  --version VERSION      Check the function against version VERSION of the game elf
  --always-diff          Show an assembly diff, even if the function matches
- -p, --check-placement      Check that functions are placed in the correct objects and are correctly placed in the header if they are marked as lazy
+ --warnings-as-errors   Errors instead of printing a warning if a function can't be checked (mainly for CI)
+ --check-mismatch-comments   Checks that all mismatching functions have a NON_MATCHING comment with a decomp.me link above them
+ -p, --check-placement  Check that functions are placed in the correct objects and are correctly placed in the header if they are marked as lazy
+--check-object-ordering Check that the file list is alphabetically sorted
 All further arguments are forwarded onto asm-differ.
 
 asm-differ arguments:"
@@ -232,6 +240,7 @@ fn check_function(
     checker: &FunctionChecker,
     cs: &mut capstone::Capstone,
     function: &functions::Info,
+    addr2line_ctx: &Option<elf::Addr2LineContext>,
     args: &Args,
 ) -> Result<CheckResult> {
     let mut name = "";
@@ -330,6 +339,14 @@ fn check_function(
                 ));
                 return Ok(CheckResult::MatchWarn);
             } else if function.status == Status::NotDecompiled {
+                if args.check_mismatch_comments {
+                    let ctx = addr2line_ctx.as_ref().context(
+                        "Addr2line context should not be None when checking mismatch comments",
+                    )?;
+                    let (file, line) =
+                        elf::find_file_and_line_by_symbol(checker.decomp_elf, ctx, &function.name)?;
+                    check_mismatch_comment(&file, line, &function.name)?;
+                }
                 ui::print_note(&format!(
                     "function {} is marked as {} but mismatches",
                     ui::format_symbol_name(name),
@@ -363,7 +380,7 @@ fn check_single(
     }
 
     let resolved_name;
-    let name = if checker.decomp_symtab.contains_key(name) {
+    let name = if checker.decomp_symtab.contains_key(name.as_str()) {
         name
     } else {
         resolved_name = resolve_unknown_fn_interactively(name, checker.decomp_symtab, functions)?;
@@ -467,19 +484,21 @@ fn check_all(
 
     file_list.par_iter_mut().try_for_each_init(
         || {
-            if !args.check_placement {
+            if !args.check_mismatch_comments && !args.check_placement {
                 return None;
             }
             // addr2line structs can't be safely shared between threads, so we create one context
             // per thread (NOT per iteration)
-            let file = addr2line::object::File::parse(&data_sync.clone()).unwrap();
-            Some(addr2line::Context::new(&file).unwrap())
+            let ctx = elf::create_addr2line_ctx_for(checker.decomp_elf).expect(
+                "The decomp elf should be valid, so creating an addr2line context should work",
+            );
+            Some(ctx)
         },
         |ctx, (object_name, object)| -> Result<()> {
             for function in object.text_section.iter_mut() {
                 let result = CAPSTONE.with(|cs| -> Result<()> {
                     let mut cs = cs.borrow_mut();
-                    let status = check_function(checker, &mut cs, function, args).unwrap();
+                    let status = check_function(checker, &mut cs, ctx, function, args).unwrap();
                     match status {
                         CheckResult::MismatchError => {
                             failed.store(true, atomic::Ordering::Relaxed);
@@ -502,24 +521,17 @@ fn check_all(
                     Ok(())
                 });
 
-                if result.is_err() {
+                if let Err(e) = result {
                     failed.store(true, atomic::Ordering::Relaxed);
+                    println!("Error while checking function {}: {e}", &function.name);
                 }
 
                 if args.check_placement {
                     let ctx = ctx.as_ref().unwrap();
-                    let symbol =
-                        elf::find_function_symbol_by_name(checker.decomp_elf, function.name());
                     let demangled_name = viking::functions::demangle_str(function.name()).unwrap_or(function.name().to_string());
-                    if let Ok(sym) = symbol {
-                        let file_name = ctx
-                            .find_frames(sym.st_value)
-                            .unwrap()
-                            .last()
-                            .unwrap()
-                            .context("No frame found")?
-                            .location.context("No location found")?
-                            .file.context("no file found")?.to_owned();
+                    let location_info = elf::find_file_and_line_by_symbol(&checker.decomp_elf, ctx, function.name());
+                    if let Ok((file_name, _)) = location_info {
+                        let sym = elf::find_function_symbol_by_name(&checker.decomp_elf, function.name())?;
                         if function.lazy {
                             if sym.st_bind() != goblin::elf::sym::STB_WEAK {
                                 viking::ui::print_warn_or_error(&format!("Found function that is marked as lazy in the file list, but not in the decomp elf: {:?} (maybe move it into the header?)", demangled_name), args.warnings_as_errors);

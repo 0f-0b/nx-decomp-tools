@@ -39,7 +39,7 @@ pub enum AddressLabel {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Info {
     #[serde(serialize_with = "as_hex")]
-    pub offset: u64,
+    pub offset: u32,
     pub size: u32,
     pub label: AddressLabel,
     pub status: Status,
@@ -49,11 +49,11 @@ pub struct Info {
     pub guess: bool,
 }
 
-fn as_hex<S>(address: &u64, serializer: S) -> Result<S::Ok, S::Error>
+fn as_hex<S>(offset: &u32, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!("0x{:x}", address))
+    serializer.serialize_str(&format!("0x{:x}", offset))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -126,7 +126,7 @@ pub fn get_functions(file_list_data: &FileListMap) -> Vec<Info> {
     result
 }
 
-pub fn make_known_function_map<'a>(functions: &'a Vec<Info>) -> FxHashMap<u64, &'a Info> {
+pub fn make_known_function_map<'a>(functions: &'a Vec<Info>) -> FxHashMap<u32, &'a Info> {
     let mut known_functions =
         FxHashMap::with_capacity_and_hasher(functions.len(), Default::default());
 

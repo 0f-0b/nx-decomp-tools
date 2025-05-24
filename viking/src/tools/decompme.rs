@@ -472,7 +472,11 @@ fn main() -> Result<()> {
     let version = args.version.as_deref();
     let decomp_elf = elf::load_decomp_elf(version)?;
     let orig_elf = elf::load_orig_elf(version)?;
-    let function = elf::get_function(&orig_elf, function_info.offset, function_info.size as u64)?;
+    let function = elf::get_function(
+        &orig_elf,
+        function_info.offset as u64,
+        function_info.size as u64,
+    )?;
     let disassembly = get_disassembly(function_info, &function)?;
 
     let mut flags = decomp_me_config.default_compile_flags.clone();
@@ -483,7 +487,7 @@ fn main() -> Result<()> {
     let source_file = args
         .source_file
         .clone()
-        .or_else(|| deduce_source_file_from_debug_info(&decomp_elf, &function_info.name()).ok());
+        .or_else(|| deduce_source_file_from_debug_info(&decomp_elf, function_info.name()).ok());
 
     let mut source_code = String::new();
     if let Some(source_file) = source_file.as_deref() {
