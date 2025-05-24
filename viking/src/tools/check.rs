@@ -1,3 +1,5 @@
+use addr2line::fallible_iterator::FallibleIterator;
+use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -9,17 +11,13 @@ use itertools::Itertools;
 use lexopt::prelude::*;
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::collections::HashSet;
-use std::env;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::sync::atomic;
-use std::sync::Mutex;
 use viking::checks::FunctionChecker;
 use viking::checks::Mismatch;
 use viking::elf;
 use viking::functions;
+use viking::functions::get_file_list_path;
 use viking::functions::Status;
 use viking::repo;
 use viking::ui;
@@ -35,7 +33,8 @@ struct Args {
     version: Option<String>,
     always_diff: bool,
     warnings_as_errors: bool,
-    check_mismatch_comments: bool,
+    check_placement: bool,
+    check_object_ordering: bool,
     print_help: bool,
     other_args: Vec<String>,
 }
@@ -64,12 +63,16 @@ fn main() -> Result<()> {
     // Load these in parallel.
     let mut decomp_symtab = None;
     let mut decomp_glob_data_table = None;
-    let mut functions = None;
+    let mut file_list = None;
 
     rayon::scope(|s| {
         s.spawn(|_| decomp_symtab = Some(elf::make_symbol_map_by_name(&decomp_elf)));
         s.spawn(|_| decomp_glob_data_table = Some(elf::build_glob_data_table(&decomp_elf)));
-        s.spawn(|_| functions = Some(functions::get_functions(version)));
+        s.spawn(|_| {
+            file_list = Some(functions::parse_file_list(
+                get_file_list_path(version).as_path(),
+            ));
+        });
     });
 
     let decomp_symtab = decomp_symtab
@@ -80,7 +83,9 @@ fn main() -> Result<()> {
         .unwrap()
         .context("failed to make global data table")?;
 
-    let functions = functions.unwrap().context("failed to load function CSV")?;
+    let file_list = file_list.unwrap().context("failed to load file list")?;
+
+    let functions = functions::get_functions(&file_list);
 
     let checker = FunctionChecker::new(
         &orig_elf,
@@ -93,9 +98,9 @@ fn main() -> Result<()> {
     .context("failed to construct FunctionChecker")?;
 
     if let Some(func) = &args.function {
-        check_single(&checker, &functions, func, &args)?;
+        check_single(&checker, &functions, file_list, func, &args)?;
     } else {
-        check_all(&checker, &functions, &args)?;
+        check_all(&checker, file_list, &args)?;
     }
 
     Ok(())
@@ -120,12 +125,16 @@ fn parse_args() -> Result<Args, lexopt::Error> {
                 args.warnings_as_errors = true;
             }
 
-            Long("check-mismatch-comments") => {
-                args.check_mismatch_comments = true;
-            }
-
             Long("help") | Short('h') => {
                 args.print_help = true;
+            }
+
+            Long("check-placement") | Short('p') => {
+                args.check_placement = true;
+            }
+
+            Long("check-object-ordering") => {
+                args.check_object_ordering = true;
             }
 
             Value(other_val) if args.function.is_none() => {
@@ -154,7 +163,7 @@ fn parse_args() -> Result<Args, lexopt::Error> {
 
 fn print_help() -> Result<()> {
     println!(
-"Usage: check [function name] [--version VERSION] [--always-diff] [--warnings-as-errors] [--check-mismatch-comments] [asm-differ arguments]
+"Usage: check [function name] [--version VERSION] [--always-diff] [asm-differ arguments]
 
 Checks if the compiled bytecode of a function matches the assembly found within the game elf. If not, show the differences between them.
 If no function name is provided, all functions within the repository function list will be checked.
@@ -164,8 +173,7 @@ optional arguments:
  -h, --help             Show this help message and exit
  --version VERSION      Check the function against version VERSION of the game elf
  --always-diff          Show an assembly diff, even if the function matches
- --warnings-as-errors   Errors instead of printing a warning if a function can't be checked (mainly for CI)
- --check-mismatch-comments   Checks that all mismatching functions have a NON_MATCHING comment with a decomp.me link above them
+ -p, --check-placement      Check that functions are placed in the correct objects and are correctly placed in the header if they are marked as lazy
 All further arguments are forwarded onto asm-differ.
 
 asm-differ arguments:"
@@ -224,11 +232,27 @@ fn check_function(
     checker: &FunctionChecker,
     cs: &mut capstone::Capstone,
     function: &functions::Info,
-    addr2line_ctx: &Option<elf::Addr2LineContext>,
     args: &Args,
 ) -> Result<CheckResult> {
-    let name = function.name.as_str();
-    let decomp_fn = elf::get_function_by_name(checker.decomp_elf, checker.decomp_symtab, name);
+    let mut name = "";
+    let mut decomp_fn = Err(anyhow!("Function not found"));
+
+    match &function.label {
+        functions::AddressLabel::Single(label) => {
+            decomp_fn = elf::get_function_by_name(checker.decomp_elf, checker.decomp_symtab, label);
+            name = label;
+        }
+        functions::AddressLabel::Multi(labels) => {
+            for label in labels {
+                decomp_fn =
+                    elf::get_function_by_name(checker.decomp_elf, checker.decomp_symtab, label);
+                if decomp_fn.is_ok() {
+                    name = label;
+                    break;
+                }
+            }
+        }
+    }
 
     match function.status {
         Status::NotDecompiled if decomp_fn.is_err() => return Ok(CheckResult::Ok),
@@ -251,15 +275,18 @@ fn check_function(
     let decomp_fn = decomp_fn.unwrap();
 
     let get_orig_fn = || {
-        elf::get_function(checker.orig_elf, function.addr, function.size as u64).with_context(
-            || {
-                format!(
-                    "failed to get function {} ({}) from the original executable",
-                    name,
-                    ui::format_address(function.addr),
-                )
-            },
+        elf::get_function(
+            checker.orig_elf,
+            function.offset as u64,
+            function.size as u64,
         )
+        .with_context(|| {
+            format!(
+                "failed to get function {} ({}) from the original executable",
+                name,
+                ui::format_address(function.offset as u64),
+            )
+        })
     };
 
     match function.status {
@@ -302,23 +329,13 @@ fn check_function(
                     function.status.description(),
                 ));
                 return Ok(CheckResult::MatchWarn);
-            } else {
-                if args.check_mismatch_comments {
-                    let ctx = addr2line_ctx.as_ref().context(
-                        "Addr2line context should not be None when checking mismatch comments",
-                    )?;
-                    let (file, line) =
-                        elf::find_file_and_line_by_symbol(checker.decomp_elf, ctx, &function.name)?;
-                    check_mismatch_comment(&file, line, &function.name)?;
-                }
-                if function.status == Status::NotDecompiled {
-                    ui::print_note(&format!(
-                        "function {} is marked as {} but mismatches",
-                        ui::format_symbol_name(name),
-                        function.status.description(),
-                    ));
-                    return Ok(CheckResult::MismatchWarn);
-                }
+            } else if function.status == Status::NotDecompiled {
+                ui::print_note(&format!(
+                    "function {} is marked as {} but mismatches",
+                    ui::format_symbol_name(name),
+                    function.status.description(),
+                ));
+                return Ok(CheckResult::MismatchWarn);
             }
         }
 
@@ -330,13 +347,14 @@ fn check_function(
 
 fn check_single(
     checker: &FunctionChecker,
-    functions: &[functions::Info],
+    functions: &Vec<functions::Info>,
+    mut file_list: functions::FileList,
     fn_to_check: &str,
     args: &Args,
 ) -> Result<()> {
     let version = args.get_version();
     let function = ui::fuzzy_search_function_interactively(functions, fn_to_check)?;
-    let name = function.name.as_str();
+    let name = function.name();
 
     eprintln!("{}", ui::format_symbol_name(name).bold());
 
@@ -360,7 +378,11 @@ fn check_single(
             )
         })?;
 
-    let orig_fn = elf::get_function(checker.orig_elf, function.addr, function.size as u64)?;
+    let orig_fn = elf::get_function(
+        checker.orig_elf,
+        function.offset as u64,
+        function.size as u64,
+    )?;
 
     let mut maybe_mismatch = checker
         .check(&mut make_cs()?, &orig_fn, &decomp_fn)
@@ -384,85 +406,184 @@ fn check_single(
     }
 
     let new_status = match maybe_mismatch {
-        None => Status::Matching,
+        Option::None => Status::Matching,
         _ if function.status == Status::NotDecompiled => Status::Wip,
         _ => function.status.clone(),
     };
 
     // Update the function entry if needed.
     let status_changed = function.status != new_status;
-    let name_was_ambiguous = function.name != name;
-    if status_changed || name_was_ambiguous {
-        if status_changed {
-            ui::print_note(&format!(
-                "changing status from {:?} to {:?}",
-                function.status, new_status
-            ));
-        }
-
-        update_function_in_function_list(functions, function.addr, version, |entry| {
-            entry.status = new_status.clone();
-            entry.name = name.to_string();
-        })?;
+    if status_changed {
+        ui::print_note(&format!(
+            "changing status from {:?} to {:?}",
+            function.status, new_status
+        ));
+        update_single_function_in_file_list(&mut file_list, function.offset, new_status)?;
+        functions::write_functions_to_path(
+            functions::get_file_list_path(args.version.as_deref()).as_path(),
+            file_list,
+        )?;
     }
 
     Ok(())
 }
 
-fn check_all(checker: &FunctionChecker, functions: &[functions::Info], args: &Args) -> Result<()> {
-    let failed = atomic::AtomicBool::new(false);
-    let new_function_statuses: Mutex<HashMap<u64, functions::Status>> = Mutex::new(HashMap::new());
+fn check_all(
+    checker: &FunctionChecker,
+    mut file_list: functions::FileList,
+    args: &Args,
+) -> Result<()> {
+    if args.check_object_ordering {
+        let object_names: Vec<&String> = file_list
+            .iter()
+            .filter_map(|(nm, _)| {
+                if nm.contains("UNKNOWN") || nm.contains("Unknown/") {
+                    return None;
+                }
+                Some(nm)
+            })
+            .collect_vec();
+        object_names.windows(2).for_each(|e| {
+            use std::cmp::Ordering::*;
+            let current = e[0];
+            let next = e[1];
+            let ordering = current.to_lowercase().cmp(&next.to_lowercase());
+            match ordering {
+                Greater => ui::print_warning(&format!(
+                    "Object {current} is placed before {next}, breaking the alphabetical ordering"
+                )),
+                Equal => ui::print_warning(&format!(
+                    "Found multiple objects with the same name {current}"
+                )),
+                Less => {} // Ordering is correct
+            }
+        });
+    }
+    let data = &checker.decomp_elf.as_owner().1;
+    let data_sync = std::sync::Arc::new(data);
 
-    functions.par_iter().for_each_init(
-        || -> Option<elf::Addr2LineContext> {
-            if !args.check_mismatch_comments {
+    let failed = atomic::AtomicBool::new(false);
+    let functions_changed = atomic::AtomicBool::new(false);
+
+    file_list.par_iter_mut().try_for_each_init(
+        || {
+            if !args.check_placement {
                 return None;
             }
             // addr2line structs can't be safely shared between threads, so we create one context
             // per thread (NOT per iteration)
-            let ctx = elf::create_addr2line_ctx_for(checker.decomp_elf).expect(
-                "The decomp elf should be valid, so creating an addr2line context should work",
-            );
-            Some(ctx)
+            let file = addr2line::object::File::parse(&data_sync.clone()).unwrap();
+            Some(addr2line::Context::new(&file).unwrap())
         },
-        |addr2line_ctx, function| {
-            let result = CAPSTONE.with(|cs| -> Result<()> {
-                let mut cs = cs.borrow_mut();
-                let ok = check_function(checker, &mut cs, function, addr2line_ctx, args)?;
-                match ok {
-                    CheckResult::MismatchError => {
-                        failed.store(true, atomic::Ordering::Relaxed);
+        |ctx, (object_name, object)| -> Result<()> {
+            for function in object.text_section.iter_mut() {
+                let result = CAPSTONE.with(|cs| -> Result<()> {
+                    let mut cs = cs.borrow_mut();
+                    let status = check_function(checker, &mut cs, function, args).unwrap();
+                    match status {
+                        CheckResult::MismatchError => {
+                            failed.store(true, atomic::Ordering::Relaxed);
+                        }
+                        CheckResult::MatchWarn => {
+                            if function.status != functions::Status::Matching {
+                                functions_changed.store(true, atomic::Ordering::Relaxed);
+                                function.status = functions::Status::Matching;
+                            }
+                        }
+                        CheckResult::MismatchWarn => {
+                            if function.status != functions::Status::NonMatchingMajor {
+                                functions_changed.store(true, atomic::Ordering::Relaxed);
+                                function.status = functions::Status::NonMatchingMajor;
+                            }
+
+                        }
+                        CheckResult::Ok => {}
                     }
-                    CheckResult::MatchWarn => {
-                        new_function_statuses
-                            .lock()
-                            .unwrap()
-                            .insert(function.addr, functions::Status::Matching);
-                    }
-                    CheckResult::MismatchWarn => {
-                        new_function_statuses
-                            .lock()
-                            .unwrap()
-                            .insert(function.addr, functions::Status::NonMatchingMajor);
-                    }
-                    CheckResult::Ok => {}
+                    Ok(())
+                });
+
+                if result.is_err() {
+                    failed.store(true, atomic::Ordering::Relaxed);
                 }
-                Ok(())
-            });
 
-            if let Err(e) = result {
-                failed.store(true, atomic::Ordering::Relaxed);
-                println!("Error while checking function {}: {e}", &function.name);
+                if args.check_placement {
+                    let ctx = ctx.as_ref().unwrap();
+                    let symbol =
+                        elf::find_function_symbol_by_name(checker.decomp_elf, function.name());
+                    let demangled_name = viking::functions::demangle_str(function.name()).unwrap_or(function.name().to_string());
+                    if let Ok(sym) = symbol {
+                        let file_name = ctx
+                            .find_frames(sym.st_value)
+                            .unwrap()
+                            .last()
+                            .unwrap()
+                            .context("No frame found")?
+                            .location.context("No location found")?
+                            .file.context("no file found")?.to_owned();
+                        if function.lazy {
+                            if sym.st_bind() != goblin::elf::sym::STB_WEAK {
+                                viking::ui::print_warn_or_error(&format!("Found function that is marked as lazy in the file list, but not in the decomp elf: {:?} (maybe move it into the header?)", demangled_name), args.warnings_as_errors);
+                                if args.warnings_as_errors {
+                                    failed.store(true, atomic::Ordering::Relaxed);
+                                }
+                            }
+                            continue;
+                        }
+                        if sym.st_bind() == goblin::elf::sym::STB_WEAK {
+                            viking::ui::print_warn_or_error(&format!("Found function that is marked as lazy in the decomp elf, but not in the file list: {:?} (maybe move it into the cpp?)", demangled_name), args.warnings_as_errors);
+                            if args.warnings_as_errors {
+                                failed.store(true, atomic::Ordering::Relaxed);
+                            }
+                        }
+                        if !file_name.ends_with(".cpp") { continue; }
+                        let object_path_start_index: usize;
+                        if let Some(index) = file_name.find("lib/") {
+                            object_path_start_index = index + 4;
+                        } else if let Some(index) = file_name.find("src/") {
+                            object_path_start_index = index + 4;
+                        } else {
+                            bail!("Source file should not be located outside of lib and src");
+                        }
+                        let mut object_path = file_name[object_path_start_index..].to_owned();
+                        if let Some(prefixes) = repo::get_config().file_list_removed_prefixes.clone() {
+                            for prefix in prefixes {
+                                if object_path.starts_with(&prefix) {
+                                    object_path = object_path[prefix.len()..].to_owned();
+                                }
+                            }
+                        }
+
+                        if let Some(excluded_folders) = repo::get_config().no_object_check_for.clone() {
+                            let mut skip_object = false;
+                            for folder in excluded_folders {
+                                if object_path.starts_with(&folder) {
+                                    skip_object = true;
+                                    break;
+                                }
+                            }
+                            if skip_object { continue; }
+                        }
+
+                        object_path = object_path.replace(".cpp", ".o");
+                            if object_path != *object_name {
+                            viking::ui::print_warn_or_error(&format!("Found function implemented in the wrong file: {:?}, implemented in: {:?}, should be implemented in: {:?}", demangled_name, object_path, object_name), args.warnings_as_errors);
+                            if args.warnings_as_errors {
+                                failed.store(true, atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
             }
+            Ok(())
         },
-    );
+    )?;
 
-    update_function_statuses(
-        functions,
-        &new_function_statuses.lock().unwrap(),
-        args.version.as_deref(),
-    )
-    .with_context(|| "failed to update function statuses")?;
+    if functions_changed.load(atomic::Ordering::Relaxed) {
+        functions::write_functions_to_path(
+            functions::get_file_list_path(args.version.as_deref()).as_path(),
+            file_list,
+        )?;
+    }
 
     if failed.load(atomic::Ordering::Relaxed) {
         bail!("found at least one error");
@@ -487,42 +608,23 @@ thread_local! {
     static CAPSTONE: RefCell<cs::Capstone> = RefCell::new(make_cs().unwrap());
 }
 
-fn update_function_statuses(
-    functions: &[functions::Info],
-    new_function_statuses: &HashMap<u64, functions::Status>,
-    version: Option<&str>,
+fn update_single_function_in_file_list(
+    file_list: &mut functions::FileList,
+    offset: u32,
+    new_status: functions::Status,
 ) -> Result<()> {
-    if new_function_statuses.is_empty() {
-        return Ok(());
-    }
-
-    let mut new_functions = functions.to_vec();
-
-    new_functions.par_iter_mut().for_each(|info| {
-        if let Some(status) = new_function_statuses.get(&info.addr) {
-            info.status = status.clone()
+    for (_, object) in file_list.iter_mut() {
+        for function in object.text_section.iter_mut() {
+            if function.offset == offset {
+                function.status = new_status.clone();
+                return Ok(());
+            }
         }
-    });
-
-    functions::write_functions(&new_functions, version)
-}
-
-fn update_function_in_function_list<UpdateFn>(
-    functions: &[functions::Info],
-    addr: u64,
-    version: Option<&str>,
-    update_fn: UpdateFn,
-) -> Result<()>
-where
-    UpdateFn: FnOnce(&mut functions::Info),
-{
-    let mut new_functions = functions.to_vec();
-    let entry = new_functions
-        .iter_mut()
-        .find(|info| info.addr == addr)
-        .unwrap();
-    update_fn(entry);
-    functions::write_functions(&new_functions, version)
+    }
+    bail!(
+        "Could not find function to update (with offset: {:?})",
+        offset
+    )
 }
 
 fn resolve_unknown_fn_interactively(
@@ -554,7 +656,7 @@ fn resolve_unknown_fn_interactively(
     let decompiled_functions: HashSet<&str> = functions
         .iter()
         .filter(|info| info.is_decompiled())
-        .map(|info| info.name.as_str())
+        .map(|info| info.name())
         .collect();
     candidates.retain(|(&name, _)| !decompiled_functions.contains(name));
 
@@ -607,8 +709,8 @@ fn show_asm_differ(
         .arg("-I")
         .arg("-e")
         .arg(name)
-        .arg(format!("0x{:016x}", function.addr))
-        .arg(format!("0x{:016x}", function.addr + function.size as u64))
+        .arg(format!("0x{:016x}", function.offset))
+        .arg(format!("0x{:016x}", function.offset + function.size))
         .args(differ_args);
 
     if let Some(version) = version {
@@ -622,7 +724,7 @@ fn show_asm_differ(
 }
 
 fn rediff_function_after_differ(
-    functions: &[functions::Info],
+    functions: &Vec<functions::Info>,
     orig_fn: &elf::Function,
     name: &str,
     previous_check_result: &Option<Mismatch>,
@@ -679,72 +781,4 @@ fn rediff_function_after_differ(
     }
 
     Ok(maybe_mismatch)
-}
-
-fn check_mismatch_comment(
-    file_path: &str,
-    line: u32,
-    function_symbol: &str,
-) -> std::io::Result<()> {
-    fn rfind_function_metadata_block<'a>(function_symbol: &str, content: &'a str) -> &'a str {
-        let function_name = if let Ok(demangled_name) = functions::demangle_str(function_symbol) {
-            // Extract the function name from the damngled name (removing the function params and
-            // any extra namespaces)
-            let function_name_and_namespace = demangled_name
-                .split_once("(")
-                .expect("Demangled function names should always have an opening parenthesis")
-                .0;
-            function_name_and_namespace
-                .rsplit_once("::")
-                .map(|v| v.1)
-                .unwrap_or(function_name_and_namespace)
-                .to_string()
-        } else {
-            function_symbol.to_string()
-        };
-
-        // Get all content up from the end of the line with the function signature until an empty line
-        let fn_signature_start_index = content
-            .rfind(&format!("{function_name}("))
-            .unwrap_or(content.len() - 1);
-
-        let fn_signature_line_end_index = content[fn_signature_start_index..]
-            .find("\n")
-            .unwrap_or(0)
-            + fn_signature_start_index;
-        let content_from_fn_signature_line_end = &content[..fn_signature_line_end_index];
-        let start_index = content_from_fn_signature_line_end
-            .rfind("\n\n")
-            .unwrap_or(0);
-        &content_from_fn_signature_line_end[start_index..]
-    }
-
-    let file = File::open(file_path)?;
-    let reader = BufReader::new(file);
-
-    let lines = reader
-        .lines()
-        .take(line as usize)
-        .collect::<Result<Vec<_>, _>>()?;
-    let content = lines.join("\n");
-
-    let function_signature_and_comments = rfind_function_metadata_block(function_symbol, &content);
-    let cwd = env::current_dir()?;
-    let cwd_str = cwd
-        .to_str()
-        .expect("The current work dir should always be valid as a str");
-    let file_rel_path = file_path
-        .strip_prefix(&format!("{cwd_str}/"))
-        .unwrap_or(file_path);
-    if !function_signature_and_comments.contains("NON_MATCHING") {
-        ui::print_warning(&format!("Function at line {} of {} mismatches and should have a `NON_MATCHING` comment above it with a `decomp.me` link", line, file_rel_path));
-    } else if !function_signature_and_comments.contains("decomp.me") {
-        // Not the full https://decomp.me/scratch to allow for comments like "Same mismatch as above, no decomp.me needed"
-        ui::print_warning(&format!(
-            "NON_MATCHING comment for function at line {} of {} should have a `decomp.me` link",
-            line, file_rel_path
-        ));
-    }
-
-    Ok(())
 }
