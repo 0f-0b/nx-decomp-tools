@@ -37,7 +37,8 @@ fn main() -> Result<()> {
 
     let args: Args = argh::from_env();
 
-    let functions = functions::get_functions(args.version.as_deref())?;
+    let file_list = functions::parse_file_list(&functions::get_file_list_path(args.version.as_deref()))?;
+    let functions = functions::get_functions(&file_list);
     let known_funcs = functions::make_known_function_name_map(&functions);
 
     let elf = elf::load_decomp_elf(args.version.as_deref())?;
