@@ -175,7 +175,7 @@ pub struct FunctionChecker<'a, 'functions, 'orig_elf, 'decomp_elf> {
     decomp_addr_to_name_map: Lazy<elf::AddrToNameMap<'decomp_elf>>,
 
     known_data_symbols: KnownDataSymbolMap,
-    known_functions: FxHashMap<u64, &'functions functions::Info>,
+    known_functions: FxHashMap<u32, &'functions functions::Info>,
 
     pub orig_elf: &'orig_elf elf::OwnedElf,
     orig_got_section: Option<&'orig_elf goblin::elf::SectionHeader>,
@@ -196,7 +196,7 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
         known_data_symbols.load(get_data_symbol_csv_path(version)?.as_path(), decomp_symtab)?;
 
         let known_functions = functions::make_known_function_map(functions);
-        
+
         let orig_got_section = elf::find_section(orig_elf, ".got").ok();
 
         Ok(FunctionChecker {
@@ -417,8 +417,8 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
 
     /// Returns None on success and a MismatchCause on failure.
     fn check_function_call(&self, orig_addr: u64, decomp_addr: u64) -> Option<MismatchCause> {
-        let info = *self.known_functions.get(&orig_addr)?;
-        let name = info.name.as_str();
+        let info = *self.known_functions.get(&(orig_addr as u32))?;
+        let name = info.name();
         let decomp_symbol = self.decomp_symtab.get(name)?;
         let expected = decomp_symbol.st_value;
 

@@ -39,7 +39,7 @@ pub struct Function<'a> {
     pub code: &'a [u8],
 }
 
-impl<'a> Function<'a> {
+impl Function<'_> {
     #[inline]
     pub fn get_addr_range(&self) -> Range<u64> {
         self.addr..(self.addr + self.code.len() as u64)
@@ -179,7 +179,7 @@ pub fn find_function_symbol_by_name(elf: &OwnedElf, name: &str) -> Result<Sym> {
             return Ok(symbol);
         }
     }
-    bail!("unknown function")
+    bail!("Unknown function: {:?}", name)
 }
 
 pub fn make_symbol_map_by_name(elf: &OwnedElf) -> Result<SymbolTableByName<'_>> {

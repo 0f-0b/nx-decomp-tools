@@ -335,8 +335,8 @@ fn create_scratch(
         compiler: decomp_me_config.compiler_name.clone(),
         compiler_flags: flags.to_string(),
         platform: "switch".to_string(),
-        name: info.name.clone(),
-        diff_label: Some(info.name.clone()),
+        name: info.name().to_string(),
+        diff_label: Some(info.name().to_string()),
         target_asm: disassembly.to_string(),
         source_code: source_code.to_string(),
         context: context.to_string(),
@@ -397,7 +397,7 @@ impl std::fmt::Display for InstructionWrapper {
 fn get_disassembly(function_info: &functions::Info, function: &elf::Function) -> Result<String> {
     let mut disassembly = String::new();
 
-    disassembly += &function_info.name;
+    disassembly += function_info.name();
     disassembly += ":\n";
 
     let iter = bad64::disasm(function.code, function.addr);
@@ -447,16 +447,22 @@ fn main() -> Result<()> {
         .as_ref()
         .context("decomp.me integration needs to be configured")?;
 
-    let functions = functions::get_functions(args.version.as_deref())?;
+    let file_list =
+        functions::parse_file_list(&functions::get_file_list_path(args.version.as_deref()))?;
+    let functions = functions::get_functions(&file_list);
 
     let function_info = ui::fuzzy_search_function_interactively(&functions, &args.function_name)?;
 
-    eprintln!("{}", ui::format_symbol_name(&function_info.name).bold());
+    eprintln!("{}", ui::format_symbol_name(function_info.name()).bold());
 
     let version = args.version.as_deref();
     let decomp_elf = elf::load_decomp_elf(version)?;
     let orig_elf = elf::load_orig_elf(version)?;
-    let function = elf::get_function(&orig_elf, function_info.addr, function_info.size as u64)?;
+    let function = elf::get_function(
+        &orig_elf,
+        function_info.offset as u64,
+        function_info.size as u64,
+    )?;
     let disassembly = get_disassembly(function_info, &function)?;
 
     let mut flags = decomp_me_config.default_compile_flags.clone();
@@ -467,7 +473,7 @@ fn main() -> Result<()> {
     let source_file = args
         .source_file
         .clone()
-        .or_else(|| deduce_source_file_from_debug_info(&decomp_elf, &function_info.name).ok());
+        .or_else(|| deduce_source_file_from_debug_info(&decomp_elf, function_info.name()).ok());
 
     let mut source_code = String::new();
     if let Some(source_file) = source_file.as_deref() {
@@ -480,7 +486,7 @@ fn main() -> Result<()> {
             .context("failed to get translation unit")?;
 
         let function_text = tu
-            .try_get_and_remove_function(&function_info.name)
+            .try_get_and_remove_function(function_info.name())
             .unwrap_or_else(|err| {
                 ui::print_note(&format!("Unable to automatically move function to source code tab (caused by error: {})", &err));
                 "// move the target function from the context to the source tab".to_string()
@@ -491,8 +497,8 @@ fn main() -> Result<()> {
          // original address: {:#x} \n\
          \n\
          {}",
-            &function_info.name,
-            function_info.get_start(),
+            function_info.name(),
+            function_info.offset,
             &function_text
         );
 
