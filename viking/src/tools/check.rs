@@ -252,12 +252,12 @@ fn check_function(
     let decomp_fn = decomp_fn.unwrap();
 
     let get_orig_fn = || {
-        elf::get_function(checker.orig_elf, function.offset, function.size as u64).with_context(
+        elf::get_function(checker.orig_elf, function.offset as u64, function.size as u64).with_context(
             || {
                 format!(
                     "failed to get function {} ({}) from the original executable",
                     name,
-                    ui::format_address(function.offset),
+                    ui::format_address(function.offset as u64),
                 )
             },
         )
@@ -352,7 +352,7 @@ fn check_single(
             )
         })?;
 
-    let orig_fn = elf::get_function(checker.orig_elf, function.offset, function.size as u64)?;
+    let orig_fn = elf::get_function(checker.orig_elf, function.offset as u64, function.size as u64)?;
 
     let mut maybe_mismatch = checker
         .check(&mut make_cs()?, &orig_fn, &decomp_fn)
@@ -466,9 +466,18 @@ fn check_all(
                             .file.context("no file found")?.to_owned();
                         if function.lazy {
                             if sym.st_bind() != goblin::elf::sym::STB_WEAK {
-                                viking::ui::print_warning(&format!("Found function that is marked as lazy in the file list, but not in the decomp elf: {:?} (maybe move into the header?)", demangled_name));
+                                viking::ui::print_warn_or_error(&format!("Found function that is marked as lazy in the file list, but not in the decomp elf: {:?} (maybe move it into the header?)", demangled_name), args.warnings_as_errors);
+                                if args.warnings_as_errors {
+                                    failed.store(true, atomic::Ordering::Relaxed);
+                                }
                             }
                             continue;
+                        }
+                        if sym.st_bind() == goblin::elf::sym::STB_WEAK {
+                            viking::ui::print_warn_or_error(&format!("Found function that is marked as lazy in the decomp elf, but not in the file list: {:?} (maybe move it into the cpp?)", demangled_name), args.warnings_as_errors);
+                            if args.warnings_as_errors {
+                                failed.store(true, atomic::Ordering::Relaxed);
+                            }
                         }
                         if !file_name.ends_with(".cpp") { continue; }
                         let object_path_start_index: usize;
@@ -501,7 +510,10 @@ fn check_all(
 
                         object_path = object_path.replace(".cpp", ".o");
                             if object_path != *object_name {
-                            viking::ui::print_warning(&format!("Found function implemented in the wrong file: {:?}, implemented in: {:?}, should be implemented in: {:?}", demangled_name, object_path, object_name));
+                            viking::ui::print_warn_or_error(&format!("Found function implemented in the wrong file: {:?}, implemented in: {:?}, should be implemented in: {:?}", demangled_name, object_path, object_name), args.warnings_as_errors);
+                            if args.warnings_as_errors {
+                                failed.store(true, atomic::Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -542,20 +554,20 @@ thread_local! {
 
 fn update_single_function_in_file_list(
     file_list: &mut functions::FileListMap,
-    address: u64,
+    offset: u32,
     new_status: functions::Status,
 ) -> Result<()> {
     for object in file_list.values_mut() {
         for function in object.text_section.iter_mut() {
-            if function.offset == address {
+            if function.offset == offset {
                 function.status = new_status.clone();
                 return Ok(());
             }
         }
     }
     bail!(
-        "Could not find function to update (with address: {:?})",
-        address
+        "Could not find function to update (with offset: {:?})",
+        offset
     )
 }
 
@@ -642,7 +654,7 @@ fn show_asm_differ(
         .arg("-e")
         .arg(name)
         .arg(format!("0x{:016x}", function.offset))
-        .arg(format!("0x{:016x}", function.offset + function.size as u64))
+        .arg(format!("0x{:016x}", function.offset + function.size as u32))
         .args(differ_args);
 
     if let Some(version) = version {
