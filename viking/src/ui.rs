@@ -12,7 +12,7 @@ pub fn print_note(msg: &str) {
     eprintln!("{}{}{}", "note".bold().cyan(), ": ".bold(), msg.bold())
 }
 
-pub fn print_warn_or_error(msg: &str, is_error: bool){
+pub fn print_warn_or_error(msg: &str, is_error: bool) {
     if is_error {
         print_error(msg);
     } else {
