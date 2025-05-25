@@ -4,6 +4,7 @@ from collections import defaultdict
 from colorama import Back, Fore, Style
 from util import utils
 from util.utils import FunctionStatus
+from util.config import CONFIG
 import typing as tp
 
 parser = argparse.ArgumentParser()
@@ -24,12 +25,45 @@ num_total = 0
 code_size: tp.DefaultDict[FunctionStatus, int] = defaultdict(int)
 counts: tp.DefaultDict[FunctionStatus, int] = defaultdict(int)
 
-for info in utils.get_functions(version=args.version):
+# TODO: Move these to uitls.py once the new file list format is upstreamed
+
+class FileListEntryInfo:
+    def __init__(self, label: str, status: FunctionStatus, size: int):
+        self.label = label
+        self.status = status
+        self.size = size
+
+_status_map = {
+    "Matching": FunctionStatus.Matching,
+    "NonMatchingMajor": FunctionStatus.NonMatching,
+    "NonMatchingMinor": FunctionStatus.Equivalent,
+    "NotDecompiled": FunctionStatus.NotDecompiled,
+    "Wip": FunctionStatus.Wip,
+}
+
+# Manual parsing for better performance
+def parse_file_list_data() -> tp.List[FileListEntryInfo]:
+    funtions = []
+    with open(CONFIG["file_list"]) as file_list:
+        current_size = 0
+        current_label = ""
+        for line in file_list:
+            line = line.strip()
+            if "size:" in line:
+                line_parts = line.split(" ")
+                current_size = int(line_parts[-1])
+            elif "label:" in line:
+                line_parts = line.split(" ")
+                current_label = line_parts[-1].removesuffix("]") # Get last element in case label is a string array
+            elif "status:" in line:
+                line_parts = line.split(" ")
+                status = _status_map.get(line_parts[-1], FunctionStatus.NotDecompiled)
+                funtions.append(FileListEntryInfo(current_label, status, current_size))
+    return funtions
+
+for info in parse_file_list_data():
     code_size_total += info.size
     num_total += 1
-
-    if not info.decomp_name:
-        continue
 
     counts[info.status] += 1
     code_size[info.status] += info.size
@@ -37,13 +71,13 @@ for info in utils.get_functions(version=args.version):
     if not args.csv:
         if info.status == FunctionStatus.NonMatching:
             if args.print_nm:
-                print(f"{Fore.RED}NM{Fore.RESET} {utils.format_symbol_name(info.decomp_name)}")
+                print(f"{Fore.RED}NM{Fore.RESET} {utils.format_symbol_name(info.label)}")
         elif info.status == FunctionStatus.Equivalent:
             if args.print_eq:
-                print(f"{Fore.YELLOW}EQ{Fore.RESET} {utils.format_symbol_name(info.decomp_name)}")
+                print(f"{Fore.YELLOW}EQ{Fore.RESET} {utils.format_symbol_name(info.label)}")
         elif info.status == FunctionStatus.Matching:
             if args.print_ok:
-                print(f"{Fore.GREEN}OK{Fore.RESET} {utils.format_symbol_name(info.decomp_name)}")
+                print(f"{Fore.GREEN}OK{Fore.RESET} {utils.format_symbol_name(info.label)}")
 
 
 def format_progress(label: str, num: int, size: int):

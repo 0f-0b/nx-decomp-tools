@@ -8,7 +8,7 @@ pub struct Config {
     pub file_list: String,
     pub default_version: Option<String>,
     pub file_list_removed_prefixes: Option<Vec<String>>,
-    pub ignore_placement_in_objects_from: Option<Vec<String>>,
+    pub no_object_check_for: Option<Vec<String>>,
     pub decomp_me: Option<ConfigDecompMe>,
 }
 

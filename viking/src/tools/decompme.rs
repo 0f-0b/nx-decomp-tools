@@ -356,7 +356,7 @@ fn create_scratch(
         target_asm: disassembly.to_string(),
         source_code: source_code.to_string(),
         context: context.to_string(),
-        diff_label: Some(info.name().clone()),
+        diff_label: Some(info.name().to_string()),
         compiler: decomp_me_config.compiler_name.clone(),
         compiler_flags: flags.map(|s| s.to_string()),
         preset: decomp_me_config.preset_id.clone(),

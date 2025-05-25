@@ -66,7 +66,7 @@ impl Info {
     pub fn is_decompiled(&self) -> bool {
         !matches!(self.status, Status::NotDecompiled | Status::Library)
     }
-    pub fn name(&self) -> &String {
+    pub fn name(&self) -> &str {
         match &self.label {
             AddressLabel::Single(label) => label,
             AddressLabel::Multi(labels) => labels.first().unwrap(),

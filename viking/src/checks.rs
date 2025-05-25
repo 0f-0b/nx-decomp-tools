@@ -418,7 +418,7 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
     /// Returns None on success and a MismatchCause on failure.
     fn check_function_call(&self, orig_addr: u64, decomp_addr: u64) -> Option<MismatchCause> {
         let info = *self.known_functions.get(&(orig_addr as u32))?;
-        let name = info.name().as_str();
+        let name = info.name();
         let decomp_symbol = self.decomp_symtab.get(name)?;
         let expected = decomp_symbol.st_value;
 

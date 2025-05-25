@@ -12,6 +12,8 @@ use lexopt::prelude::*;
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::sync::atomic;
 use viking::checks::FunctionChecker;
 use viking::checks::Mismatch;
@@ -793,4 +795,72 @@ fn rediff_function_after_differ(
     }
 
     Ok(maybe_mismatch)
+}
+
+fn check_mismatch_comment(
+    file_path: &str,
+    line: u32,
+    function_symbol: &str,
+) -> std::io::Result<()> {
+    fn rfind_function_metadata_block<'a>(function_symbol: &str, content: &'a str) -> &'a str {
+        let function_name = if let Ok(demangled_name) = functions::demangle_str(function_symbol) {
+            // Extract the function name from the damngled name (removing the function params and
+            // any extra namespaces)
+            let function_name_and_namespace = demangled_name
+                .split_once("(")
+                .expect("Demangled function names should always have an opening parenthesis")
+                .0;
+            function_name_and_namespace
+                .rsplit_once("::")
+                .map(|v| v.1)
+                .unwrap_or(function_name_and_namespace)
+                .to_string()
+        } else {
+            function_symbol.to_string()
+        };
+
+        // Get all content up from the end of the line with the function signature until an empty line
+        let fn_signature_start_index = content
+            .rfind(&format!("{function_name}("))
+            .unwrap_or(content.len() - 1);
+
+        let fn_signature_line_end_index = content[fn_signature_start_index..]
+            .find("\n")
+            .unwrap_or(0)
+            + fn_signature_start_index;
+        let content_from_fn_signature_line_end = &content[..fn_signature_line_end_index];
+        let start_index = content_from_fn_signature_line_end
+            .rfind("\n\n")
+            .unwrap_or(0);
+        &content_from_fn_signature_line_end[start_index..]
+    }
+
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+
+    let lines = reader
+        .lines()
+        .take(line as usize)
+        .collect::<Result<Vec<_>, _>>()?;
+    let content = lines.join("\n");
+
+    let function_signature_and_comments = rfind_function_metadata_block(function_symbol, &content);
+    let cwd = env::current_dir()?;
+    let cwd_str = cwd
+        .to_str()
+        .expect("The current work dir should always be valid as a str");
+    let file_rel_path = file_path
+        .strip_prefix(&format!("{cwd_str}/"))
+        .unwrap_or(file_path);
+    if !function_signature_and_comments.contains("NON_MATCHING") {
+        ui::print_warning(&format!("Function at line {} of {} mismatches and should have a `NON_MATCHING` comment above it with a `decomp.me` link", line, file_rel_path));
+    } else if !function_signature_and_comments.contains("decomp.me") {
+        // Not the full https://decomp.me/scratch to allow for comments like "Same mismatch as above, no decomp.me needed"
+        ui::print_warning(&format!(
+            "NON_MATCHING comment for function at line {} of {} should have a `decomp.me` link",
+            line, file_rel_path
+        ));
+    }
+
+    Ok(())
 }
