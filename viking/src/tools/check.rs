@@ -228,7 +228,7 @@ fn check_function(
     function: &functions::Info,
     args: &Args,
 ) -> Result<CheckResult> {
-    let name = function.name().as_str();
+    let name = function.name();
     let decomp_fn = elf::get_function_by_name(checker.decomp_elf, checker.decomp_symtab, name);
 
     match function.status {
@@ -252,15 +252,18 @@ fn check_function(
     let decomp_fn = decomp_fn.unwrap();
 
     let get_orig_fn = || {
-        elf::get_function(checker.orig_elf, function.offset as u64, function.size as u64).with_context(
-            || {
-                format!(
-                    "failed to get function {} ({}) from the original executable",
-                    name,
-                    ui::format_address(function.offset as u64),
-                )
-            },
+        elf::get_function(
+            checker.orig_elf,
+            function.offset as u64,
+            function.size as u64,
         )
+        .with_context(|| {
+            format!(
+                "failed to get function {} ({}) from the original executable",
+                name,
+                ui::format_address(function.offset as u64),
+            )
+        })
     };
 
     match function.status {
@@ -328,7 +331,7 @@ fn check_single(
 ) -> Result<()> {
     let version = args.get_version();
     let function = ui::fuzzy_search_function_interactively(&functions, fn_to_check)?;
-    let name = function.name().as_str();
+    let name = function.name();
 
     eprintln!("{}", ui::format_symbol_name(name).bold());
 
@@ -352,7 +355,11 @@ fn check_single(
             )
         })?;
 
-    let orig_fn = elf::get_function(checker.orig_elf, function.offset as u64, function.size as u64)?;
+    let orig_fn = elf::get_function(
+        checker.orig_elf,
+        function.offset as u64,
+        function.size as u64,
+    )?;
 
     let mut maybe_mismatch = checker
         .check(&mut make_cs()?, &orig_fn, &decomp_fn)
@@ -454,7 +461,7 @@ fn check_all(
                     let ctx = ctx.as_ref().unwrap();
                     let symbol =
                         elf::find_function_symbol_by_name(&checker.decomp_elf, function.name());
-                    let demangled_name = viking::functions::demangle_str(function.name()).unwrap_or(function.name().clone());
+                    let demangled_name = viking::functions::demangle_str(function.name()).unwrap_or(function.name().to_string());
                     if let Ok(sym) = symbol {
                         let file_name = ctx
                             .find_frames(sym.st_value)
@@ -497,7 +504,7 @@ fn check_all(
                             }
                         }
 
-                        if let Some(excluded_folders) = repo::get_config().ignore_placement_in_objects_from.clone() {
+                        if let Some(excluded_folders) = repo::get_config().no_object_check_for.clone() {
                             let mut skip_object = false;
                             for folder in excluded_folders {
                                 if object_path.starts_with(&folder) {
@@ -600,7 +607,7 @@ fn resolve_unknown_fn_interactively(
     let decompiled_functions: HashSet<&str> = functions
         .iter()
         .filter(|info| info.is_decompiled())
-        .map(|info| info.name().as_str())
+        .map(|info| info.name())
         .collect();
     candidates.retain(|(&name, _)| !decompiled_functions.contains(name));
 

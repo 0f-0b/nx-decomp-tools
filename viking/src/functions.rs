@@ -66,7 +66,7 @@ impl Info {
     pub fn is_decompiled(&self) -> bool {
         !matches!(self.status, Status::NotDecompiled | Status::Library)
     }
-    pub fn name(&self) -> &String {
+    pub fn name(&self) -> &str {
         match &self.label {
             AddressLabel::Single(label) => label,
             AddressLabel::Multi(labels) => labels.first().unwrap(),
@@ -149,9 +149,9 @@ pub fn make_known_function_name_map<'a>(functions: &'a Vec<Info>) -> FxHashMap<&
             continue;
         }
         match &function.label {
-            AddressLabel::Single(label) => { 
+            AddressLabel::Single(label) => {
                 known_functions.insert(label.as_str(), function);
-            },
+            }
             AddressLabel::Multi(labels) => {
                 for label in labels {
                     known_functions.insert(label.as_str(), function);

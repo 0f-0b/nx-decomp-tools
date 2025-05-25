@@ -236,8 +236,8 @@ fn create_scratch(
         compiler: decomp_me_config.compiler_name.clone(),
         compiler_flags: flags.to_string(),
         platform: "switch".to_string(),
-        name: info.name().clone(),
-        diff_label: Some(info.name().clone()),
+        name: info.name().to_string(),
+        diff_label: Some(info.name().to_string()),
         target_asm: disassembly.to_string(),
         source_code: source_code.to_string(),
         context: context.to_string(),
@@ -348,7 +348,8 @@ fn main() -> Result<()> {
         .as_ref()
         .context("decomp.me integration needs to be configured")?;
 
-    let file_list = functions::parse_file_list(&functions::get_file_list_path(args.version.as_deref()))?;
+    let file_list =
+        functions::parse_file_list(&functions::get_file_list_path(args.version.as_deref()))?;
     let functions = functions::get_functions(&file_list);
 
     let function_info = ui::fuzzy_search_function_interactively(&functions, &args.function_name)?;
@@ -358,7 +359,11 @@ fn main() -> Result<()> {
     let version = args.version.as_deref();
     let decomp_elf = elf::load_decomp_elf(version)?;
     let orig_elf = elf::load_orig_elf(version)?;
-    let function = elf::get_function(&orig_elf, function_info.offset as u64, function_info.size as u64)?;
+    let function = elf::get_function(
+        &orig_elf,
+        function_info.offset as u64,
+        function_info.size as u64,
+    )?;
     let disassembly = get_disassembly(function_info, &function)?;
 
     let source_code = format!(
