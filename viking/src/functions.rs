@@ -126,7 +126,7 @@ pub fn get_functions(file_list_data: &FileListMap) -> Vec<Info> {
     result
 }
 
-pub fn make_known_function_map<'a>(functions: &'a Vec<Info>) -> FxHashMap<u32, &'a Info> {
+pub fn make_known_function_map(functions: &Vec<Info>) -> FxHashMap<u32, &Info> {
     let mut known_functions =
         FxHashMap::with_capacity_and_hasher(functions.len(), Default::default());
 
@@ -140,7 +140,7 @@ pub fn make_known_function_map<'a>(functions: &'a Vec<Info>) -> FxHashMap<u32, &
     known_functions
 }
 
-pub fn make_known_function_name_map<'a>(functions: &'a Vec<Info>) -> FxHashMap<&'a str, &'a Info> {
+pub fn make_known_function_name_map(functions: &Vec<Info>) -> FxHashMap<&str, &Info> {
     let mut known_functions =
         FxHashMap::with_capacity_and_hasher(functions.len(), Default::default());
 
@@ -189,7 +189,7 @@ pub fn fuzzy_search<'a>(functions: &'a Vec<Info>, name: &str) -> Vec<&'a Info> {
     let mut candidates: Vec<&'a Info> = functions
         .into_par_iter()
         .filter(|function| {
-            demangle_str(function.name()).map_or(false, |demangled| demangled.contains(name))
+            demangle_str(function.name()).is_ok_and(|demangled| demangled.contains(name))
                 || function.name().contains(name)
         })
         .collect();
