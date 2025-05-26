@@ -330,7 +330,7 @@ fn check_single(
     args: &Args,
 ) -> Result<()> {
     let version = args.get_version();
-    let function = ui::fuzzy_search_function_interactively(&functions, fn_to_check)?;
+    let function = ui::fuzzy_search_function_interactively(functions, fn_to_check)?;
     let name = function.name();
 
     eprintln!("{}", ui::format_symbol_name(name).bold());
@@ -343,7 +343,7 @@ fn check_single(
     let name = if checker.decomp_symtab.contains_key(name) {
         name
     } else {
-        resolved_name = resolve_unknown_fn_interactively(name, checker.decomp_symtab, &functions)?;
+        resolved_name = resolve_unknown_fn_interactively(name, checker.decomp_symtab, functions)?;
         &resolved_name
     };
 
@@ -378,7 +378,7 @@ fn check_single(
         show_asm_differ(function, name, &args.other_args, version)?;
 
         maybe_mismatch =
-            rediff_function_after_differ(&functions, &orig_fn, name, &maybe_mismatch, version)
+            rediff_function_after_differ(functions, &orig_fn, name, &maybe_mismatch, version)
                 .context("failed to rediff")?;
     }
 
@@ -460,7 +460,7 @@ fn check_all(
                 if args.check_placement {
                     let ctx = ctx.as_ref().unwrap();
                     let symbol =
-                        elf::find_function_symbol_by_name(&checker.decomp_elf, function.name());
+                        elf::find_function_symbol_by_name(checker.decomp_elf, function.name());
                     let demangled_name = viking::functions::demangle_str(function.name()).unwrap_or(function.name().to_string());
                     if let Ok(sym) = symbol {
                         let file_name = ctx
@@ -661,7 +661,7 @@ fn show_asm_differ(
         .arg("-e")
         .arg(name)
         .arg(format!("0x{:016x}", function.offset))
-        .arg(format!("0x{:016x}", function.offset + function.size as u32))
+        .arg(format!("0x{:016x}", function.offset + function.size))
         .args(differ_args);
 
     if let Some(version) = version {

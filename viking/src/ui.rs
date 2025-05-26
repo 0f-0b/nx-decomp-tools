@@ -95,7 +95,7 @@ pub fn fuzzy_search_function_interactively<'a>(
 
             let options = candidates
                 .iter()
-                .map(|info| format_symbol_name(&info.name()))
+                .map(|info| format_symbol_name(info.name()))
                 .collect_vec();
 
             let selection = inquire::Select::new(&prompt, options)

@@ -126,7 +126,7 @@ pub fn get_functions(file_list_data: &FileListMap) -> Vec<Info> {
     result
 }
 
-pub fn make_known_function_map<'a>(functions: &'a Vec<Info>) -> FxHashMap<u32, &'a Info> {
+pub fn make_known_function_map(functions: &Vec<Info>) -> FxHashMap<u32, &Info> {
     let mut known_functions =
         FxHashMap::with_capacity_and_hasher(functions.len(), Default::default());
 
@@ -140,7 +140,7 @@ pub fn make_known_function_map<'a>(functions: &'a Vec<Info>) -> FxHashMap<u32, &
     known_functions
 }
 
-pub fn make_known_function_name_map<'a>(functions: &'a Vec<Info>) -> FxHashMap<&'a str, &'a Info> {
+pub fn make_known_function_name_map(functions: &Vec<Info>) -> FxHashMap<&str, &Info> {
     let mut known_functions =
         FxHashMap::with_capacity_and_hasher(functions.len(), Default::default());
 
