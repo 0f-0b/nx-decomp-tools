@@ -421,7 +421,7 @@ impl std::fmt::Display for InstructionWrapper {
 fn get_disassembly(function_info: &functions::Info, function: &elf::Function) -> Result<String> {
     let mut disassembly = String::new();
 
-    disassembly += &function_info.name();
+    disassembly += function_info.name();
     disassembly += ":\n";
 
     let iter = bad64::disasm(function.code, function.addr);
@@ -465,9 +465,9 @@ fn main() -> Result<()> {
 
     let function_info = ui::fuzzy_search_function_interactively(&functions, &args.function_name)?;
 
-    let demangled_name = functions::demangle_str(&function_info.name())?;
+    let demangled_name = functions::demangle_str(function_info.name())?;
 
-    eprintln!("{}", ui::format_symbol_name(&function_info.name()).bold());
+    eprintln!("{}", ui::format_symbol_name(function_info.name()).bold());
 
     let version = args.version.as_deref();
     let decomp_elf = elf::load_decomp_elf(version)?;
