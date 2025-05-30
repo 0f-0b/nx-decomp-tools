@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import argparse
 from collections import defaultdict
 from colorama import Back, Fore, Style
@@ -47,14 +48,18 @@ def parse_file_list_data() -> tp.List[FileListEntryInfo]:
     with open(CONFIG["file_list"]) as file_list:
         current_size = 0
         current_label = ""
-        for line in file_list:
+        file_list_lines = list(file_list)
+        for i, line in enumerate(file_list_lines):
             line = line.strip()
             if "size:" in line:
                 line_parts = line.split(" ")
                 current_size = int(line_parts[-1])
             elif "label:" in line:
-                line_parts = line.split(" ")
-                current_label = line_parts[-1].removesuffix("]") # Get last element in case label is a string array
+                # Get last element if label is a string array
+                if "-" in file_list_lines[i + 1]:
+                    current_label = file_list_lines[i + 1].split(" ")[-1]
+                else:
+                    current_label = line.split(" ")[-1]
             elif "status:" in line:
                 line_parts = line.split(" ")
                 status = _status_map.get(line_parts[-1], FunctionStatus.NotDecompiled)
