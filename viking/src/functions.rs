@@ -53,7 +53,7 @@ fn as_hex<S>(offset: &u32, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!("0x{:x}", offset))
+    serializer.serialize_str(&format!("0x{:06x}", offset))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
