@@ -1,4 +1,5 @@
 use addr2line::fallible_iterator::FallibleIterator;
+use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -228,8 +229,25 @@ fn check_function(
     function: &functions::Info,
     args: &Args,
 ) -> Result<CheckResult> {
-    let name = function.name();
-    let decomp_fn = elf::get_function_by_name(checker.decomp_elf, checker.decomp_symtab, name);
+    let mut name = "";
+    let mut decomp_fn = Err(anyhow!("Function not found"));
+
+    match &function.label {
+        functions::AddressLabel::Single(label) => {
+            decomp_fn = elf::get_function_by_name(checker.decomp_elf, checker.decomp_symtab, label);
+            name = label;
+        }
+        functions::AddressLabel::Multi(labels) => {
+            for label in labels {
+                decomp_fn =
+                    elf::get_function_by_name(checker.decomp_elf, checker.decomp_symtab, label);
+                if decomp_fn.is_ok() {
+                    name = label;
+                    break;
+                }
+            }
+        }
+    }
 
     match function.status {
         Status::NotDecompiled if decomp_fn.is_err() => return Ok(CheckResult::Ok),
@@ -581,7 +599,7 @@ fn update_single_function_in_file_list(
 fn resolve_unknown_fn_interactively(
     ambiguous_name: &str,
     decomp_symtab: &elf::SymbolTableByName,
-    functions: &Vec<functions::Info>,
+    functions: &[functions::Info],
 ) -> Result<String> {
     let fail = || -> Result<String> {
         bail!("unknown function: {}", ambiguous_name);
