@@ -1,4 +1,4 @@
-use anyhow::{ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use capstone as cs;
 use cs::arch::arm64::{Arm64Insn, Arm64Operand, Arm64OperandType};
 use lazy_init::Lazy;
@@ -19,6 +19,27 @@ struct DataSymbol {
     pub size: u64,
 }
 
+fn parse_data_symbol_csv_entry(
+    record: &csv::StringRecord,
+    decomp_symtab: &elf::SymbolTableByName,
+) -> Result<Option<DataSymbol>> {
+    ensure!(record.len() == 2, "wrong number of fields");
+
+    let addr = functions::parse_address(&record[0])?;
+    let name = &record[1];
+
+    let Some(symbol) = decomp_symtab.get(name) else {
+        // Ignore missing symbols.
+        return Ok(None);
+    };
+
+    Ok(Some(DataSymbol {
+        addr,
+        name: name.to_owned(),
+        size: symbol.st_size,
+    }))
+}
+
 /// Keeps track of known data symbols so that data loads can be validated.
 #[derive(Default)]
 struct KnownDataSymbolMap {
@@ -37,28 +58,9 @@ impl KnownDataSymbolMap {
             .quoting(false)
             .from_path(csv_path)?;
         for (line, maybe_record) in reader.records().enumerate() {
-            let record = &maybe_record?;
-            ensure!(
-                record.len() == 2,
-                "invalid number of fields on line {}",
-                line
-            );
-
-            let addr = functions::parse_address(&record[0])?;
-            let name = &record[1];
-
-            let symbol = decomp_symtab.get(name);
-            // Ignore missing symbols.
-            if symbol.is_none() {
-                continue;
-            }
-            let symbol = symbol.unwrap();
-
-            self.symbols.push(DataSymbol {
-                addr,
-                name: name.to_string(),
-                size: symbol.st_size,
-            });
+            let entry = parse_data_symbol_csv_entry(&maybe_record?, decomp_symtab)
+                .with_context(|| format!("failed to parse record at line {}", line + 1))?;
+            self.symbols.extend(entry);
         }
         self.symbols.sort_by_key(|sym| sym.addr);
         Ok(())
@@ -95,6 +97,72 @@ fn get_data_symbol_csv_path(version: Option<&str>) -> Result<PathBuf> {
     Ok(repo::get_data_path(version)?.join("data_symbols.csv"))
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum ConstantKind {
+    Bytes,
+    String,
+    U16String,
+}
+
+#[derive(Debug)]
+struct Constant {
+    pub addr: u64,
+    pub size: u64,
+    pub kind: ConstantKind,
+}
+
+fn parse_constant_csv_entry(record: &csv::StringRecord) -> Result<Constant> {
+    ensure!(record.len() == 3, "wrong number of fields");
+
+    let addr = functions::parse_address(&record[0])?;
+    let size = record[1].parse()?;
+    let kind = match &record[2] {
+        "B" => ConstantKind::Bytes,
+        "S" => ConstantKind::String,
+        "U" => ConstantKind::U16String,
+        kind => bail!("invalid constant kind: {kind}"),
+    };
+
+    Ok(Constant { addr, size, kind })
+}
+
+#[derive(Debug, Default)]
+struct ConstantMap {
+    constants: Vec<Constant>,
+}
+
+impl ConstantMap {
+    fn new() -> Self {
+        Default::default()
+    }
+
+    fn load(&mut self, csv_path: &Path) -> Result<()> {
+        const HEADER: &[&str] = &["Address", "Size", "Kind"];
+        let mut reader = csv::ReaderBuilder::new()
+            .quoting(false)
+            .from_path(csv_path)?;
+        ensure!(reader.headers()? == HEADER, "wrong format");
+        for (line, maybe_record) in reader.records().enumerate() {
+            let entry = parse_constant_csv_entry(&maybe_record?)
+                .with_context(|| format!("failed to parse record at line {}", line + 1))?;
+            self.constants.push(entry);
+        }
+        self.constants.sort_by_key(|constant| constant.addr);
+        Ok(())
+    }
+
+    fn get(&self, addr: u64) -> Option<&Constant> {
+        self.constants
+            .binary_search_by_key(&addr, |constant| constant.addr)
+            .ok()
+            .map(|index| &self.constants[index])
+    }
+}
+
+fn get_constant_csv_path(version: Option<&str>) -> Result<PathBuf> {
+    Ok(repo::get_data_path(version)?.join("constants.csv"))
+}
+
 #[derive(Debug)]
 pub struct ReferenceDiff {
     pub referenced_symbol: u64,
@@ -122,6 +190,28 @@ impl std::fmt::Display for ReferenceDiff {
 }
 
 #[derive(Debug)]
+pub struct ConstantDiff {
+    pub orig_addr: u64,
+    pub expected_data: Vec<u8>,
+    pub actual_data: Vec<u8>,
+    pub kind: ConstantKind,
+}
+
+impl std::fmt::Display for ConstantDiff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "incorrect constant; expected to see {ref}\n\
+            --> decomp source code is referencing {actual}\n\
+            --> expected to see {expected} to match original code",
+            ref=ui::format_address(self.orig_addr),
+            expected=ui::format_constant(&self.expected_data, self.kind),
+            actual=ui::format_constant(&self.actual_data, self.kind),
+        )
+    }
+}
+
+#[derive(Debug)]
 pub enum MismatchCause {
     FunctionSize,
     Register,
@@ -129,6 +219,7 @@ pub enum MismatchCause {
     BranchTarget,
     FunctionCall(ReferenceDiff),
     DataReference(ReferenceDiff),
+    Constant(ConstantDiff),
     Immediate,
     Unknown,
 }
@@ -142,6 +233,7 @@ impl std::fmt::Display for MismatchCause {
             Self::BranchTarget => write!(f, "wrong branch target"),
             Self::FunctionCall(diff) => write!(f, "wrong function call\n{diff}"),
             Self::DataReference(diff) => write!(f, "wrong data reference\n{diff}"),
+            Self::Constant(diff) => write!(f, "wrong constant\n{diff}"),
             Self::Immediate => write!(f, "wrong immediate"),
             Self::Unknown => write!(f, "unknown reason"),
         }
@@ -175,6 +267,7 @@ pub struct FunctionChecker<'a, 'functions, 'orig_elf, 'decomp_elf> {
     decomp_addr_to_name_map: Lazy<elf::AddrToNameMap<'decomp_elf>>,
 
     known_data_symbols: KnownDataSymbolMap,
+    known_constants: ConstantMap,
     known_functions: FxHashMap<u32, &'functions functions::Info>,
 
     pub orig_elf: &'orig_elf elf::OwnedElf,
@@ -193,7 +286,14 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
         version: Option<&str>,
     ) -> Result<Self> {
         let mut known_data_symbols = KnownDataSymbolMap::new();
-        known_data_symbols.load(get_data_symbol_csv_path(version)?.as_path(), decomp_symtab)?;
+        known_data_symbols
+            .load(&get_data_symbol_csv_path(version)?, decomp_symtab)
+            .context("failed to load data_symbols.csv")?;
+
+        let mut known_constants = ConstantMap::new();
+        known_constants
+            .load(&get_constant_csv_path(version)?)
+            .context("failed to load constants.csv")?;
 
         let known_functions = functions::make_known_function_map(functions);
 
@@ -206,6 +306,7 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
             decomp_addr_to_name_map: Lazy::new(),
 
             known_data_symbols,
+            known_constants,
             known_functions,
 
             orig_elf,
@@ -327,6 +428,12 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
                                     return Self::make_mismatch(&i1, &i2, mismatch_cause);
                                 }
 
+                                if let Some(mismatch_cause) =
+                                    self.check_constant(orig_addr, decomp_addr)
+                                {
+                                    return Self::make_mismatch(&i1, &i2, mismatch_cause);
+                                }
+
                                 // If the data symbol reference matches, allow the instructions to be different.
                                 diff_ok = true;
                             }
@@ -380,13 +487,16 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
 
                     // Is this an ADRP pair we can check?
                     if state.adrp_pair_registers.contains(&reg) {
-                        let orig_addr_ptr = (state.gprs1[&reg] as i64 + mem.0.disp() as i64) as u64;
-                        let decomp_addr_ptr =
-                            (state.gprs2[&reg] as i64 + mem.1.disp() as i64) as u64;
+                        let orig_addr = (state.gprs1[&reg] as i64 + mem.0.disp() as i64) as u64;
+                        let decomp_addr = (state.gprs2[&reg] as i64 + mem.1.disp() as i64) as u64;
 
                         if let Some(mismatch_cause) =
-                            self.check_data_symbol_ptr(orig_addr_ptr, decomp_addr_ptr)
+                            self.check_data_symbol_ptr(orig_addr, decomp_addr)
                         {
+                            return Self::make_mismatch(&i1, &i2, mismatch_cause);
+                        }
+
+                        if let Some(mismatch_cause) = self.check_constant(orig_addr, decomp_addr) {
                             return Self::make_mismatch(&i1, &i2, mismatch_cause);
                         }
 
@@ -487,9 +597,42 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
                 .ok()?,
         );
 
-        let data_symbol = self.known_data_symbols.get_symbol(orig_addr)?;
         let decomp_addr = *self.decomp_glob_data_table.get(&decomp_addr_ptr)?;
-        self.check_data_symbol_ex(orig_addr, decomp_addr, data_symbol)
+
+        if let Some(mismatch_cause) = self.check_data_symbol(orig_addr, decomp_addr) {
+            return Some(mismatch_cause);
+        }
+
+        if let Some(mismatch_cause) = self.check_constant(orig_addr, decomp_addr) {
+            return Some(mismatch_cause);
+        }
+
+        None
+    }
+
+    fn check_constant(&self, orig_addr: u64, decomp_addr: u64) -> Option<MismatchCause> {
+        let constant = self.known_constants.get(orig_addr)?;
+        let expected = elf::get_elf_bytes(self.orig_elf, orig_addr, constant.size).ok()?;
+
+        let actual = match constant.kind {
+            ConstantKind::Bytes => elf::get_elf_bytes(self.decomp_elf, decomp_addr, constant.size),
+            ConstantKind::String => elf::get_string(self.decomp_elf, decomp_addr),
+            ConstantKind::U16String => elf::get_u16string(self.decomp_elf, decomp_addr),
+        };
+        let Ok(actual) = actual else {
+            return Some(MismatchCause::Unknown);
+        };
+
+        if actual != expected {
+            return Some(MismatchCause::Constant(ConstantDiff {
+                orig_addr,
+                expected_data: expected.to_owned(),
+                actual_data: actual.to_owned(),
+                kind: constant.kind,
+            }));
+        }
+
+        None
     }
 
     fn make_mismatch(

@@ -6,6 +6,7 @@ use std::io::StderrLock;
 use std::io::Write;
 use textwrap::indent;
 
+use crate::checks::ConstantKind;
 use crate::functions;
 
 pub fn print_note(msg: &str) {
@@ -49,6 +50,64 @@ pub fn format_symbol_name(name: &str) -> String {
 
 pub fn format_address(addr: u64) -> String {
     format!("{addr:#x}").green().to_string()
+}
+
+pub fn format_bytes(bytes: &[u8]) -> String {
+    hex_simd::encode_to_string(bytes, hex_simd::AsciiCase::Lower)
+        .cyan()
+        .to_string()
+}
+
+struct StringDisplay<'a>(&'a [u8]);
+
+impl std::fmt::Display for StringDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "\"")?;
+        for chunk in self.0.utf8_chunks() {
+            for c in chunk.valid().chars() {
+                write!(f, "{}", c.escape_debug())?;
+            }
+            write!(f, "{}", chunk.invalid().escape_ascii())?;
+        }
+        write!(f, "\"")?;
+        Ok(())
+    }
+}
+
+pub fn format_string(bytes: &[u8]) -> String {
+    StringDisplay(bytes).to_string().cyan().to_string()
+}
+
+struct U16StringDisplay<'a>(&'a [u8]);
+
+impl std::fmt::Display for U16StringDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "u\"")?;
+        for c in char::decode_utf16(
+            self.0
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes(c.try_into().unwrap())),
+        ) {
+            match c {
+                Ok(c) => write!(f, "{}", c.escape_debug())?,
+                Err(e) => write!(f, "\\u{{{:04x}}}", e.unpaired_surrogate())?,
+            }
+        }
+        write!(f, "\"")?;
+        Ok(())
+    }
+}
+
+pub fn format_u16string(bytes: &[u8]) -> String {
+    U16StringDisplay(bytes).to_string().cyan().to_string()
+}
+
+pub fn format_constant(bytes: &[u8], kind: ConstantKind) -> String {
+    match kind {
+        ConstantKind::Bytes => format_bytes(bytes),
+        ConstantKind::String => format_string(bytes),
+        ConstantKind::U16String => format_u16string(bytes),
+    }
 }
 
 pub fn print_detail(msg: &str) {
