@@ -19,14 +19,16 @@ use goblin::{
 };
 use memmap::{Mmap, MmapOptions};
 use owning_ref::OwningHandle;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::repo;
 
 pub type OwnedElf = OwningHandle<Box<(File, Mmap)>, Box<Elf<'static>>>;
 pub type SymbolTableByName<'a> = HashMap<&'a str, goblin::elf::Sym>;
 pub type SymbolTableByAddr = FxHashMap<u64, goblin::elf::Sym>;
+pub type SymbolSet<'a> = FxHashSet<(u64, &'a str)>;
 pub type AddrToNameMap<'a> = FxHashMap<u64, &'a str>;
+pub type NameToAddrMap<'a> = FxHashMap<&'a str, u64>;
 pub type GlobDataTable = FxHashMap<u64, u64>;
 
 pub struct Function<'a> {
@@ -123,6 +125,7 @@ pub fn load_decomp_elf(version: Option<&str>) -> Result<OwnedElf> {
     load_elf(&decomp_elf_path)
 }
 
+#[derive(Clone, Copy)]
 pub struct SymbolStringTable<'elf> {
     bytes: &'elf [u8],
 }
@@ -182,13 +185,14 @@ pub fn find_function_symbol_by_name(elf: &OwnedElf, name: &str) -> Result<Sym> {
     bail!("Unknown function: {:?}", name)
 }
 
-pub fn make_symbol_map_by_name(elf: &OwnedElf) -> Result<SymbolTableByName> {
+pub fn make_symbol_map_by_name<'a>(
+    elf: &'a OwnedElf,
+    strtab: SymbolStringTable<'a>,
+) -> Result<SymbolTableByName<'a>> {
     let mut map = SymbolTableByName::with_capacity_and_hasher(
         elf.syms.iter().filter(filter_out_useless_syms).count(),
         Default::default(),
     );
-
-    let strtab = SymbolStringTable::from_elf(elf)?;
 
     for symbol in elf.syms.iter().filter(filter_out_useless_syms) {
         map.entry(strtab.get_string(symbol.st_name))
@@ -208,17 +212,49 @@ pub fn make_symbol_map_by_addr(elf: &OwnedElf) -> SymbolTableByAddr {
     map
 }
 
-pub fn make_addr_to_name_map(elf: &OwnedElf) -> Result<AddrToNameMap> {
+pub fn make_symbol_set<'a>(
+    elf: &'a OwnedElf,
+    strtab: SymbolStringTable<'a>,
+) -> Result<SymbolSet<'a>> {
+    let mut set = SymbolSet::with_capacity_and_hasher(
+        elf.syms.iter().filter(filter_out_useless_syms).count(),
+        Default::default(),
+    );
+
+    for symbol in elf.syms.iter().filter(filter_out_useless_syms) {
+        set.insert((symbol.st_value, strtab.get_string(symbol.st_name)));
+    }
+    Ok(set)
+}
+
+pub fn make_addr_to_name_map<'a>(
+    elf: &'a OwnedElf,
+    strtab: SymbolStringTable<'a>,
+) -> Result<AddrToNameMap<'a>> {
     let mut map = AddrToNameMap::with_capacity_and_hasher(
         elf.syms.iter().filter(filter_out_useless_syms).count(),
         Default::default(),
     );
 
-    let strtab = SymbolStringTable::from_elf(elf)?;
-
     for symbol in elf.syms.iter().filter(filter_out_useless_syms) {
         map.entry(symbol.st_value)
             .or_insert_with(|| strtab.get_string(symbol.st_name));
+    }
+    Ok(map)
+}
+
+pub fn make_name_to_addr_map<'a>(
+    elf: &'a OwnedElf,
+    strtab: SymbolStringTable<'a>,
+) -> Result<NameToAddrMap<'a>> {
+    let mut map = NameToAddrMap::with_capacity_and_hasher(
+        elf.syms.iter().filter(filter_out_useless_syms).count(),
+        Default::default(),
+    );
+
+    for symbol in elf.syms.iter().filter(filter_out_useless_syms) {
+        map.entry(strtab.get_string(symbol.st_name))
+            .or_insert(symbol.st_value);
     }
     Ok(map)
 }

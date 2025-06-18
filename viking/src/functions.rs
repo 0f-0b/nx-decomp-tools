@@ -93,12 +93,12 @@ pub type FileListMap = IndexMap<String, Object>; // Object name, object. Uses In
 
 pub fn parse_file_list(file_list_path: &Path) -> Result<FileListMap> {
     let file_list_data = std::fs::read_to_string(file_list_path)?;
-    let objects = serde_yml::from_str::<FileListMap>(&file_list_data)?;
+    let objects = serde_yaml_ng::from_str::<FileListMap>(&file_list_data)?;
     Ok(objects)
 }
 
 pub fn write_functions_to_path(file_list_path: &Path, file_list_data: &FileListMap) -> Result<()> {
-    let mut serialized_yaml = serde_yml::to_string(file_list_data)?;
+    let mut serialized_yaml = serde_yaml_ng::to_string(file_list_data)?;
     let remove_offset_quotes: regex::Regex = regex::Regex::new(r"offset:\s'(?P<offset>\w+)'")?;
     serialized_yaml = remove_offset_quotes
         .replace_all(&serialized_yaml, "offset: ${offset}")
