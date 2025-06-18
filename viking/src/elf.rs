@@ -295,24 +295,41 @@ pub fn build_glob_data_table(elf: &OwnedElf) -> Result<GlobDataTable> {
     Ok(table)
 }
 
-pub fn get_offset_in_file(elf: &OwnedElf, addr: u64) -> Result<usize> {
+pub fn get_elf_data(elf: &OwnedElf, addr: u64) -> Result<&[u8]> {
     let addr = addr as usize;
     for segment in elf.program_headers.iter() {
         if segment.p_type != PT_LOAD {
             continue;
         }
 
-        if segment.vm_range().contains(&addr) {
-            return Ok(segment.file_range().start + addr - segment.vm_range().start);
+        let vm_range = segment.vm_range();
+        if vm_range.contains(&addr) {
+            let data = &elf.as_owner().1[segment.file_range()];
+            return Ok(&data[addr - vm_range.start..]);
         }
     }
     bail!("{:#x} doesn't belong to any segment", addr)
 }
 
 pub fn get_elf_bytes(elf: &OwnedElf, addr: u64, size: u64) -> Result<&[u8]> {
-    let offset = get_offset_in_file(elf, addr)?;
+    let data = get_elf_data(elf, addr)?;
     let size = size as usize;
-    Ok(&elf.as_owner().1[offset..(offset + size)])
+    data.get(..size).context("index out of bounds")
+}
+
+pub fn get_string(elf: &OwnedElf, addr: u64) -> Result<&[u8]> {
+    let data = get_elf_data(elf, addr)?;
+    let cstr = CStr::from_bytes_until_nul(data);
+    Ok(cstr.map_or(data, |s| s.to_bytes_with_nul()))
+}
+
+pub fn get_u16string(elf: &OwnedElf, addr: u64) -> Result<&[u8]> {
+    let data = get_elf_data(elf, addr)?;
+    let len = match data.chunks_exact(2).position(|c| c == [0, 0]) {
+        Some(pos) => pos + 1,
+        None => data.len() / 2,
+    };
+    Ok(&data[..len * 2])
 }
 
 pub fn get_function(elf: &OwnedElf, addr: u64, size: u64) -> Result<Function<'_>> {
