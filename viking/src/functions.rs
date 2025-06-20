@@ -1,6 +1,5 @@
 use crate::repo;
 use anyhow::{bail, Result};
-use indexmap::IndexMap;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize, Serializer};
@@ -88,17 +87,21 @@ pub fn parse_address(value: &str) -> Result<u64> {
     Ok(parse_base_16(value)? - ADDRESS_BASE)
 }
 
-pub type FileListMap = IndexMap<String, Object>; // Object name, object. Uses IndexMap to
-                                                 // preserve map ordering
+pub type FileList = Vec<(String, Object)>;
 
-pub fn parse_file_list(file_list_path: &Path) -> Result<FileListMap> {
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+struct FileListWrapper(#[serde(with = "tuple_vec_map")] FileList);
+
+pub fn parse_file_list(file_list_path: &Path) -> Result<FileList> {
     let file_list_data = std::fs::read_to_string(file_list_path)?;
-    let objects = serde_yml::from_str::<FileListMap>(&file_list_data)?;
-    Ok(objects)
+    let file_list = serde_yml::from_str::<FileListWrapper>(&file_list_data)?;
+    Ok(file_list.0)
 }
 
-pub fn write_functions_to_path(file_list_path: &Path, file_list_data: &FileListMap) -> Result<()> {
-    let mut serialized_yaml = serde_yml::to_string(file_list_data)?;
+pub fn write_functions_to_path(file_list_path: &Path, file_list_data: FileList) -> Result<()> {
+    let wrapped = FileListWrapper(file_list_data);
+    let mut serialized_yaml = serde_yml::to_string(&wrapped)?;
     let remove_offset_quotes: regex::Regex = regex::Regex::new(r"offset:\s'(?P<offset>\w+)'")?;
     serialized_yaml = remove_offset_quotes
         .replace_all(&serialized_yaml, "offset: ${offset}")
@@ -118,15 +121,15 @@ pub fn get_file_list_path(version: Option<&str>) -> PathBuf {
     path
 }
 
-pub fn get_functions(file_list_data: &FileListMap) -> Vec<Info> {
+pub fn get_functions(file_list_data: &FileList) -> Vec<Info> {
     let mut result = Vec::with_capacity(110_000);
-    for object in file_list_data.values() {
+    for (_, object) in file_list_data {
         result.extend(object.text_section.clone());
     }
     result
 }
 
-pub fn make_known_function_map(functions: &Vec<Info>) -> FxHashMap<u32, &Info> {
+pub fn make_known_function_map(functions: &[Info]) -> FxHashMap<u32, &Info> {
     let mut known_functions =
         FxHashMap::with_capacity_and_hasher(functions.len(), Default::default());
 
@@ -140,7 +143,7 @@ pub fn make_known_function_map(functions: &Vec<Info>) -> FxHashMap<u32, &Info> {
     known_functions
 }
 
-pub fn make_known_function_name_map(functions: &Vec<Info>) -> FxHashMap<&str, &Info> {
+pub fn make_known_function_name_map(functions: &[Info]) -> FxHashMap<&str, &Info> {
     let mut known_functions =
         FxHashMap::with_capacity_and_hasher(functions.len(), Default::default());
 
@@ -174,7 +177,7 @@ pub fn demangle_str(name: &str) -> Result<String> {
     Ok(symbol.demangle(&options)?)
 }
 
-pub fn fuzzy_search<'a>(functions: &'a Vec<Info>, name: &str) -> Vec<&'a Info> {
+pub fn fuzzy_search<'a>(functions: &'a [Info], name: &str) -> Vec<&'a Info> {
     let exact_match = functions
         .par_iter()
         .find_first(|function| function.name() == name);

@@ -762,8 +762,6 @@ checksum = "cea70ddb795996207ad57735b50c5982d8844f38ba9ee5f1aedcfb708a2aa11e"
 dependencies = [
  "equivalent",
  "hashbrown",
- "rayon",
- "serde",
 ]
 
 [[package]]
@@ -1444,6 +1442,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-tuple-vec-map"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a04d0ebe0de77d7d445bb729a895dcb0a288854b267ca85f030ce51cdc578c82"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "serde_derive"
 version = "1.0.219"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1899,7 +1906,6 @@ dependencies = [
  "csv",
  "ctrlc",
  "goblin",
- "indexmap",
  "inquire",
  "itertools",
  "json_compilation_db",
@@ -1914,6 +1920,7 @@ dependencies = [
  "reqwest",
  "rustc-hash",
  "serde",
+ "serde-tuple-vec-map",
  "serde_json",
  "serde_yml",
  "tempfile",

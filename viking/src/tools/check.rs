@@ -34,6 +34,7 @@ struct Args {
     always_diff: bool,
     warnings_as_errors: bool,
     check_placement: bool,
+    check_object_ordering: bool,
     print_help: bool,
     other_args: Vec<String>,
 }
@@ -130,6 +131,10 @@ fn parse_args() -> Result<Args, lexopt::Error> {
 
             Long("check-placement") | Short('p') => {
                 args.check_placement = true;
+            }
+
+            Long("check-object-ordering") => {
+                args.check_object_ordering = true;
             }
 
             Value(other_val) if args.function.is_none() => {
@@ -343,7 +348,7 @@ fn check_function(
 fn check_single(
     checker: &FunctionChecker,
     functions: &Vec<functions::Info>,
-    mut file_list: functions::FileListMap,
+    mut file_list: functions::FileList,
     fn_to_check: &str,
     args: &Args,
 ) -> Result<()> {
@@ -416,7 +421,7 @@ fn check_single(
         update_single_function_in_file_list(&mut file_list, function.offset, new_status)?;
         functions::write_functions_to_path(
             functions::get_file_list_path(args.version.as_deref()).as_path(),
-            &file_list,
+            file_list,
         )?;
     }
 
@@ -425,9 +430,35 @@ fn check_single(
 
 fn check_all(
     checker: &FunctionChecker,
-    mut file_list: functions::FileListMap,
+    mut file_list: functions::FileList,
     args: &Args,
 ) -> Result<()> {
+    if args.check_object_ordering {
+        let object_names: Vec<&String> = file_list
+            .iter()
+            .filter_map(|(nm, _)| {
+                if nm.contains("UNKNOWN") || nm.contains("Unknown/") {
+                    return None;
+                }
+                Some(nm)
+            })
+            .collect_vec();
+        object_names.windows(2).for_each(|e| {
+            use std::cmp::Ordering::*;
+            let current = e[0];
+            let next = e[1];
+            let ordering = current.cmp(next);
+            match ordering {
+                Greater => ui::print_warning(&format!(
+                    "Object {current} is placed before {next}, breaking the alphabetical ordering"
+                )),
+                Equal => ui::print_warning(&format!(
+                    "Found multiple objects with the same name {current}"
+                )),
+                Less => {} // Ordering is correct
+            }
+        });
+    }
     let data = &checker.decomp_elf.as_owner().1;
     let data_sync = std::sync::Arc::new(data);
 
@@ -550,7 +581,7 @@ fn check_all(
     if functions_changed.load(atomic::Ordering::Relaxed) {
         functions::write_functions_to_path(
             functions::get_file_list_path(args.version.as_deref()).as_path(),
-            &file_list,
+            file_list,
         )?;
     }
 
@@ -578,11 +609,11 @@ thread_local! {
 }
 
 fn update_single_function_in_file_list(
-    file_list: &mut functions::FileListMap,
+    file_list: &mut functions::FileList,
     offset: u32,
     new_status: functions::Status,
 ) -> Result<()> {
-    for object in file_list.values_mut() {
+    for (_, object) in file_list.iter_mut() {
         for function in object.text_section.iter_mut() {
             if function.offset == offset {
                 function.status = new_status.clone();
