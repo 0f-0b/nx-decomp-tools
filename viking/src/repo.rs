@@ -1,9 +1,19 @@
 use anyhow::{bail, Result};
-use lazy_static::lazy_static;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Arch {
+    #[default]
+    Aarch64,
+    X86_64,
+}
 
 #[derive(serde::Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub arch: Arch,
     pub build_target: String,
     pub file_list: String,
     pub default_version: Option<String>,
@@ -21,18 +31,16 @@ pub struct ConfigDecompMe {
     pub default_compile_flags: String,
 }
 
-lazy_static! {
-    static ref CONFIG: Config = {
+pub fn get_config() -> &'static Config {
+    static CONFIG: OnceLock<Config> = OnceLock::new();
+
+    CONFIG.get_or_init(|| {
         let toml_path = get_repo_root()
             .expect("failed to get repo root")
             .join("tools/config.toml");
         let raw = std::fs::read_to_string(toml_path.as_path()).expect("failed to read config file");
         toml::from_str(&raw).expect("failed to parse config file")
-    };
-}
-
-pub fn get_config() -> &'static Config {
-    &CONFIG
+    })
 }
 
 pub fn get_repo_root() -> Result<PathBuf> {

@@ -95,13 +95,13 @@ struct FileListWrapper(#[serde(with = "tuple_vec_map")] FileList);
 
 pub fn parse_file_list(file_list_path: &Path) -> Result<FileList> {
     let file_list_data = std::fs::read_to_string(file_list_path)?;
-    let file_list = serde_yml::from_str::<FileListWrapper>(&file_list_data)?;
+    let file_list = serde_yaml_ng::from_str::<FileListWrapper>(&file_list_data)?;
     Ok(file_list.0)
 }
 
 pub fn write_functions_to_path(file_list_path: &Path, file_list_data: FileList) -> Result<()> {
     let wrapped = FileListWrapper(file_list_data);
-    let mut serialized_yaml = serde_yml::to_string(&wrapped)?;
+    let mut serialized_yaml = serde_yaml_ng::to_string(&wrapped)?;
     let remove_offset_quotes: regex::Regex = regex::Regex::new(r"offset:\s'(?P<offset>\w+)'")?;
     serialized_yaml = remove_offset_quotes
         .replace_all(&serialized_yaml, "offset: ${offset}")

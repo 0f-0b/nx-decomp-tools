@@ -42,7 +42,7 @@ fn main() -> Result<()> {
     let known_funcs = functions::make_known_function_name_map(&functions);
 
     let elf = elf::load_decomp_elf(args.version.as_deref())?;
-    let symtab = elf::SymbolStringTable::from_elf(&elf)?;
+    let strtab = elf::SymbolStringTable::from_elf(&elf)?;
 
     let filter = |sym: &Sym| {
         if sym.st_type() == STT_NOTYPE && sym.st_value != 0 {
@@ -79,7 +79,7 @@ fn main() -> Result<()> {
         }
         prev_addr = symbol.st_value;
 
-        let name = symtab.get_string(symbol.st_name);
+        let name = strtab.get_string(symbol.st_name);
         let func_entry = known_funcs.get(name);
 
         if let Some(func_entry) = func_entry {

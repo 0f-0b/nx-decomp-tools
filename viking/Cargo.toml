@@ -23,8 +23,6 @@ hex-simd = "0.8.0"
 inquire = "0.7.4"
 itertools = "0.12.1"
 json_compilation_db = "0.3.0"
-lazy-init = "0.5.0"
-lazy_static = "1.4.0"
 lexopt = "0.3"
 memmap = "0.7"
 mimalloc = { version = "*", default-features = false }
@@ -38,7 +36,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.78"
 clang = { version = "2.0.0", features = ["runtime", "clang_10_0"] }
 tempfile = "3.20.0"
-serde_yml = "0.0.12"
+serde_yaml_ng = "0.10.0"
 regex = "1.11.1"
 serde-tuple-vec-map = "1.0.1"
 
