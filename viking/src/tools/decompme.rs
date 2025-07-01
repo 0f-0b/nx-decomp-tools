@@ -465,15 +465,6 @@ fn main() -> Result<()> {
     )?;
     let disassembly = get_disassembly(function_info, &function)?;
 
-    let source_code = format!(
-        "// function name: {}\n\
-         // original offset: {:#x} \n\
-         \n\
-         // move the target function from the context to the source tab",
-        &function_info.name(),
-        function_info.offset,
-    );
-
     let mut flags = decomp_me_config.default_compile_flags.clone();
     let mut context = "".to_string();
 
