@@ -463,18 +463,21 @@ fn main() -> Result<()> {
         .as_ref()
         .context("decomp.me integration needs to be configured")?;
 
+    let version = args.version.as_deref();
+    let decomp_elf = elf::load_decomp_elf(version)?;
     let file_list =
         functions::parse_file_list(&functions::get_file_list_path(args.version.as_deref()))?;
     let functions = functions::get_functions(&file_list);
+    let decomp_symtab = elf::make_symbol_map_by_name(&decomp_elf)?;
 
-    let function_info = ui::fuzzy_search_function_interactively(&functions, &args.function_name)?;
+    let filtered_functions = functions::filter_candidates_by_symtab(&functions, &decomp_symtab);
+    let function_info =
+        ui::fuzzy_search_function_interactively(&filtered_functions, &args.function_name)?;
 
     let demangled_name = functions::demangle_str(function_info.name())?;
 
     eprintln!("{}", ui::format_symbol_name(function_info.name()).bold());
 
-    let version = args.version.as_deref();
-    let decomp_elf = elf::load_decomp_elf(version)?;
     let orig_elf = elf::load_orig_elf(version)?;
     let function = elf::get_function(
         &orig_elf,
