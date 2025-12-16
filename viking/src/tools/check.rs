@@ -1,4 +1,3 @@
-use addr2line::fallible_iterator::FallibleIterator;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
@@ -12,6 +11,7 @@ use lexopt::prelude::*;
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::sync::atomic;
@@ -345,9 +345,12 @@ fn check_function(
                     let ctx = addr2line_ctx.as_ref().context(
                         "Addr2line context should not be None when checking mismatch comments",
                     )?;
-                    let (file, line) =
-                        elf::find_file_and_line_by_symbol(checker.decomp_elf, ctx, &function.name)?;
-                    check_mismatch_comment(&file, line, &function.name)?;
+                    let (file, line) = elf::find_file_and_line_by_symbol(
+                        checker.decomp_elf,
+                        ctx,
+                        function.name(),
+                    )?;
+                    check_mismatch_comment(&file, line, function.name())?;
                 }
                 ui::print_note(&format!(
                     "function {} is marked as {} but mismatches",
@@ -366,7 +369,7 @@ fn check_function(
 
 fn check_single(
     checker: &FunctionChecker,
-    functions: &Vec<functions::Info>,
+    functions: &[functions::Info],
     mut file_list: functions::FileList,
     fn_to_check: &str,
     args: &Args,
@@ -382,7 +385,7 @@ fn check_single(
     }
 
     let resolved_name;
-    let name = if checker.decomp_symtab.contains_key(name.as_str()) {
+    let name = if checker.decomp_symtab.contains_key(name) {
         name
     } else {
         resolved_name = resolve_unknown_fn_interactively(name, checker.decomp_symtab, functions)?;
@@ -478,8 +481,6 @@ fn check_all(
             }
         });
     }
-    let data = &checker.decomp_elf.as_owner().1;
-    let data_sync = std::sync::Arc::new(data);
 
     let failed = atomic::AtomicBool::new(false);
     let functions_changed = atomic::AtomicBool::new(false);
@@ -500,7 +501,7 @@ fn check_all(
             for function in object.text_section.iter_mut() {
                 let result = CAPSTONE.with(|cs| -> Result<()> {
                     let mut cs = cs.borrow_mut();
-                    let status = check_function(checker, &mut cs, ctx, function, args).unwrap();
+                    let status = check_function(checker, &mut cs, function, ctx, args).unwrap();
                     match status {
                         CheckResult::MismatchError => {
                             failed.store(true, atomic::Ordering::Relaxed);
@@ -525,15 +526,15 @@ fn check_all(
 
                 if let Err(e) = result {
                     failed.store(true, atomic::Ordering::Relaxed);
-                    println!("Error while checking function {}: {e}", &function.name);
+                    println!("Error while checking function {}: {e}", function.name());
                 }
 
                 if args.check_placement {
                     let ctx = ctx.as_ref().unwrap();
                     let demangled_name = viking::functions::demangle_str(function.name()).unwrap_or(function.name().to_string());
-                    let location_info = elf::find_file_and_line_by_symbol(&checker.decomp_elf, ctx, function.name());
+                    let location_info = elf::find_file_and_line_by_symbol(checker.decomp_elf, ctx, function.name());
                     if let Ok((file_name, _)) = location_info {
-                        let sym = elf::find_function_symbol_by_name(&checker.decomp_elf, function.name())?;
+                        let sym = elf::find_function_symbol_by_name(checker.decomp_elf, function.name())?;
                         if function.lazy {
                             if sym.st_bind() != goblin::elf::sym::STB_WEAK {
                                 viking::ui::print_warn_or_error(&format!("Found function that is marked as lazy in the file list, but not in the decomp elf: {:?} (maybe move it into the header?)", demangled_name), args.warnings_as_errors);
@@ -738,7 +739,7 @@ fn show_asm_differ(
 }
 
 fn rediff_function_after_differ(
-    functions: &Vec<functions::Info>,
+    functions: &[functions::Info],
     orig_fn: &elf::Function,
     name: &str,
     previous_check_result: &Option<Mismatch>,
@@ -824,10 +825,8 @@ fn check_mismatch_comment(
             .rfind(&format!("{function_name}("))
             .unwrap_or(content.len() - 1);
 
-        let fn_signature_line_end_index = content[fn_signature_start_index..]
-            .find("\n")
-            .unwrap_or(0)
-            + fn_signature_start_index;
+        let fn_signature_line_end_index =
+            content[fn_signature_start_index..].find("\n").unwrap_or(0) + fn_signature_start_index;
         let content_from_fn_signature_line_end = &content[..fn_signature_line_end_index];
         let start_index = content_from_fn_signature_line_end
             .rfind("\n\n")

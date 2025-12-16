@@ -106,7 +106,10 @@ fn try_find_function_from_ast_entity<'tu>(
     for child in entity.get_children() {
         // The enum entry name FunctionDecl is misleading here and it applies to both function
         // declarations and definitions like Method
-        if !matches!(child.get_kind(), Method | FunctionDecl | Constructor) {
+        if !matches!(
+            child.get_kind(),
+            Method | FunctionDecl | Constructor | Destructor
+        ) {
             let recursion_result = try_find_function_from_ast_entity(child, fn_name);
             if recursion_result.is_some() {
                 return recursion_result;
@@ -318,6 +321,7 @@ fn get_translation_unit(
     })
 }
 
+#[allow(clippy::too_many_arguments)] // TODO
 /// Returns the URL of the scratch if successful.
 fn create_scratch(
     demangled_name: &str,

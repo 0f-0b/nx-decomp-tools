@@ -189,7 +189,7 @@ impl<'a, 'functions, 'orig_elf, 'decomp_elf>
         decomp_elf: &'decomp_elf elf::OwnedElf,
         decomp_symtab: &'a elf::SymbolTableByName<'decomp_elf>,
         decomp_glob_data_table: elf::GlobDataTable,
-        functions: &'functions Vec<functions::Info>,
+        functions: &'functions [functions::Info],
         version: Option<&str>,
     ) -> Result<Self> {
         let mut known_data_symbols = KnownDataSymbolMap::new();
