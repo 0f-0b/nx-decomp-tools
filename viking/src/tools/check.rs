@@ -340,24 +340,34 @@ fn check_function(
                     function.status.description(),
                 ));
                 return Ok(CheckResult::MatchWarn);
-            } else if function.status == Status::NotDecompiled {
+            } else {
                 if args.check_mismatch_comments {
                     let ctx = addr2line_ctx.as_ref().context(
                         "Addr2line context should not be None when checking mismatch comments",
                     )?;
-                    let (file, line) = elf::find_file_and_line_by_symbol(
-                        checker.decomp_elf,
-                        ctx,
-                        function.name(),
-                    )?;
-                    check_mismatch_comment(&file, line, function.name())?;
+                    if let Ok((file, line)) =
+                        elf::find_file_and_line_by_symbol(checker.decomp_elf, ctx, function.name())
+                    {
+                        if !repo::get_config()
+                            .no_object_check_for
+                            .clone()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .any(|f| file.contains(&f))
+                        {
+                            check_mismatch_comment(&file, line, function.name())?;
+                        }
+                    }
                 }
-                ui::print_note(&format!(
-                    "function {} is marked as {} but mismatches",
-                    ui::format_symbol_name(name),
-                    function.status.description(),
-                ));
-                return Ok(CheckResult::MismatchWarn);
+
+                if function.status == Status::NotDecompiled {
+                    ui::print_note(&format!(
+                        "function {} is marked as {} but mismatches",
+                        ui::format_symbol_name(name),
+                        function.status.description(),
+                    ));
+                    return Ok(CheckResult::MismatchWarn);
+                }
             }
         }
 
@@ -570,15 +580,8 @@ fn check_all(
                             }
                         }
 
-                        if let Some(excluded_folders) = repo::get_config().no_object_check_for.clone() {
-                            let mut skip_object = false;
-                            for folder in excluded_folders {
-                                if object_path.starts_with(&folder) {
-                                    skip_object = true;
-                                    break;
-                                }
-                            }
-                            if skip_object { continue; }
+                        if let Some(ref excluded_folders) = repo::get_config().no_object_check_for {
+                            if excluded_folders.iter().any(|f| object_path.starts_with(f)) { continue; }
                         }
 
                         object_path = object_path.replace(".cpp", ".o");
