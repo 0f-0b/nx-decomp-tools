@@ -21,7 +21,15 @@ def apply(config, args):
     if version is None:
         version = util.config.get_default_version()
 
-    config['arch'] = 'aarch64'
+    arch = util.config.get_arch()
+    match arch:
+        case 'aarch64':
+            config['arch'] = 'aarch64'
+        case 'x86_64':
+            config['arch'] = 'x86'
+            config['objdump_flags'] = ['--x86-asm-syntax=intel']
+        case _:
+            raise RuntimeError(f'Unsupported arch {arch}; accepted values are "aarch64" and "x86_64"')
     config['baseimg'] = util.config.get_base_elf(version)
     config['myimg'] = util.config.get_decomp_elf(version)
     config['source_directories'] = [str(root / 'src'), str(root / 'lib')]

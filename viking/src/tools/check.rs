@@ -62,14 +62,17 @@ fn main() -> Result<()> {
 
     let orig_elf = elf::load_orig_elf(version).context("failed to load original ELF")?;
     let decomp_elf = elf::load_decomp_elf(version).context("failed to load decomp ELF")?;
+    let strtab = elf::SymbolStringTable::from_elf(&decomp_elf)?;
 
     // Load these in parallel.
     let mut decomp_symtab = None;
+    let mut decomp_symbols = None;
     let mut decomp_glob_data_table = None;
     let mut file_list = None;
 
     rayon::scope(|s| {
-        s.spawn(|_| decomp_symtab = Some(elf::make_symbol_map_by_name(&decomp_elf)));
+        s.spawn(|_| decomp_symtab = Some(elf::make_symbol_map_by_name(&decomp_elf, strtab)));
+        s.spawn(|_| decomp_symbols = Some(elf::make_symbol_set(&decomp_elf, strtab)));
         s.spawn(|_| decomp_glob_data_table = Some(elf::build_glob_data_table(&decomp_elf)));
         s.spawn(|_| {
             file_list = Some(functions::parse_file_list(
@@ -82,6 +85,10 @@ fn main() -> Result<()> {
         .unwrap()
         .context("failed to make symbol map")?;
 
+    let decomp_symbols = decomp_symbols
+        .unwrap()
+        .context("failed to make symbol set")?;
+
     let decomp_glob_data_table = decomp_glob_data_table
         .unwrap()
         .context("failed to make global data table")?;
@@ -93,6 +100,7 @@ fn main() -> Result<()> {
     let checker = FunctionChecker::new(
         &orig_elf,
         &decomp_elf,
+        &decomp_symbols,
         &decomp_symtab,
         decomp_glob_data_table,
         &functions,
@@ -616,12 +624,19 @@ fn check_all(
 #[cold]
 #[inline(never)]
 fn make_cs() -> Result<cs::Capstone> {
-    cs::Capstone::new()
-        .arm64()
-        .mode(cs::arch::arm64::ArchMode::Arm)
-        .detail(true)
-        .build()
-        .or_else(viking::capstone_utils::translate_cs_error)
+    match repo::get_config().arch {
+        repo::Arch::Aarch64 => cs::Capstone::new()
+            .arm64()
+            .mode(cs::arch::arm64::ArchMode::Arm)
+            .detail(true)
+            .build(),
+        repo::Arch::X86_64 => cs::Capstone::new()
+            .x86()
+            .mode(cs::arch::x86::ArchMode::Mode64)
+            .detail(true)
+            .build(),
+    }
+    .or_else(viking::capstone_utils::translate_cs_error)
 }
 
 thread_local! {
@@ -756,9 +771,11 @@ fn rediff_function_after_differ(
     // the user could have managed to match a function that used to be non-matching
     // back when the differ was launched.
     let decomp_elf = elf::load_decomp_elf(version).context("failed to reload decomp ELF")?;
+    let strtab = elf::SymbolStringTable::from_elf(&decomp_elf)?;
 
     // Also reload the symbol table from the new ELF.
-    let decomp_symtab = elf::make_symbol_map_by_name(&decomp_elf)?;
+    let decomp_symtab = elf::make_symbol_map_by_name(&decomp_elf, strtab)?;
+    let decomp_symbols = elf::make_symbol_set(&decomp_elf, strtab)?;
     let decomp_glob_data_table = elf::build_glob_data_table(&decomp_elf)?;
 
     // And grab the possibly updated function code.
@@ -775,6 +792,7 @@ fn rediff_function_after_differ(
     let checker = FunctionChecker::new(
         orig_fn.owner_elf,
         &decomp_elf,
+        &decomp_symbols,
         &decomp_symtab,
         decomp_glob_data_table,
         functions,

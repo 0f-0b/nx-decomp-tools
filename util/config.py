@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Optional
 import toml
 
 
@@ -7,7 +8,10 @@ def get_repo_root() -> Path:
 
 CONFIG = toml.load(get_repo_root() / "tools" / "config.toml")
 
-def get_default_version() -> str:
+def get_arch() -> Optional[str]:
+    return CONFIG.get("arch")
+
+def get_default_version() -> Optional[str]:
     return CONFIG.get("default_version")
 
 def get_versioned_data_path(version = get_default_version()) -> Path:

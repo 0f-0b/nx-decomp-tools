@@ -468,7 +468,8 @@ fn main() -> Result<()> {
     let file_list =
         functions::parse_file_list(&functions::get_file_list_path(args.version.as_deref()))?;
     let functions = functions::get_functions(&file_list);
-    let decomp_symtab = elf::make_symbol_map_by_name(&decomp_elf)?;
+    let strtab = elf::SymbolStringTable::from_elf(&decomp_elf)?;
+    let decomp_symtab = elf::make_symbol_map_by_name(&decomp_elf, strtab)?;
 
     let filtered_functions = functions::filter_candidates_by_symtab(&functions, &decomp_symtab);
     let function_info =
