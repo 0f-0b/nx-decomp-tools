@@ -6,6 +6,7 @@ import warnings
 import tarfile
 import tempfile
 import urllib.request
+from typing import NoReturn
 
 from common.util import config, tools
 
@@ -20,7 +21,7 @@ def get_uncompressed_target_path(version = config.get_default_version()):
 def get_target_elf_path(version = config.get_default_version()):
     return config.get_versioned_data_path(version) / "main.elf"
 
-def fail(error: str):
+def fail(error: str) -> NoReturn:
     print(">>> " + error)
     sys.exit(1)
 

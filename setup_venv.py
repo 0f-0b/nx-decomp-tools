@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 from pathlib import Path
+from typing import NoReturn
 
 USER_FRIENDLY_VENV_PATH = "tools/common/.venv"
 
@@ -16,7 +17,7 @@ def enter_venv():
     os.environ["NX_DECOMP_TOOLS_IN_VENV"] = "1"
     os.execv(venv_executable, [venv_executable, *sys.argv])
 
-def fail(error: str):
+def fail(error: str) -> NoReturn:
     print(">>> " + error)
     sys.exit(1)
 

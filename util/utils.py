@@ -122,7 +122,7 @@ def print_error(msg: str, prefix: str = ""):
     sys.stderr.write(f"{Style.BRIGHT}{prefix}{Fore.RED}error:{Fore.RESET} {msg}{Style.RESET_ALL}\n")
 
 
-def fail(msg: str, prefix: str = ""):
+def fail(msg: str, prefix: str = "") -> tp.NoReturn:
     print_error(msg, prefix)
     sys.exit(1)
 
